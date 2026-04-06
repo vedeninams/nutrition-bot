@@ -54,16 +54,45 @@ ssh root@YOUR_SERVER_IP
 
 Type `yes` if asked about the fingerprint.
 
-### Step 5 — Run the server setup script
+### Step 5 — Set up an SSH deploy key (needed for private repos)
 
-Still on your Mac (new Terminal tab), from the `nutrition-bot` folder:
+The server needs permission to pull from your private GitHub repo. You give it that by creating an SSH key pair on the server and adding the public key to GitHub.
+
+**5a. Generate the key on the server:**
+```bash
+ssh root@YOUR_SERVER_IP 'ssh-keygen -t ed25519 -C "nutrition-bot-hetzner" -f /root/.ssh/nutrition-bot-deploy -N "" && cat /root/.ssh/nutrition-bot-deploy.pub'
+```
+Copy the entire line that's printed (starts with `ssh-ed25519 AAAA...`).
+
+**5b. Add it to GitHub:**
+1. Go to your repo → **Settings** → **Deploy keys** → **Add deploy key**
+2. Title: `Hetzner server`
+3. Key: paste the line you copied
+4. Leave "Allow write access" unchecked
+5. Click **Add key**
+
+**5c. Configure the server to use this key for GitHub:**
+```bash
+ssh root@YOUR_SERVER_IP 'cat >> /root/.ssh/config << EOF
+
+Host github.com
+  HostName github.com
+  User git
+  IdentityFile /root/.ssh/nutrition-bot-deploy
+  StrictHostKeyChecking no
+EOF'
+```
+
+### Step 6 — Run the server setup script
+
+Still on your Mac, from the `nutrition-bot` folder:
 
 ```bash
 # Upload the setup script to the server
 scp server_setup.sh root@YOUR_SERVER_IP:/root/
 
-# Run it (replace the URL with your actual GitHub repo URL)
-ssh root@YOUR_SERVER_IP 'bash /root/server_setup.sh https://github.com/YOUR_USERNAME/nutrition-bot'
+# Run it — use the SSH URL (git@github.com:...), NOT the https:// URL
+ssh root@YOUR_SERVER_IP 'bash /root/server_setup.sh git@github.com:YOUR_USERNAME/nutrition-bot.git'
 ```
 
 This takes about 1–2 minutes. It will:
@@ -74,7 +103,7 @@ This takes about 1–2 minutes. It will:
 - Create a placeholder `.env` file
 - Install and enable the systemd service
 
-### Step 6 — Fill in your API keys on the server
+### Step 7 — Fill in your API keys on the server
 
 ```bash
 ssh root@YOUR_SERVER_IP 'nano /opt/nutrition-bot/.env'
@@ -90,7 +119,7 @@ NUTRITION_DB_PATH=/opt/nutrition-bot/nutrition.db
 
 Save: `Ctrl+X` → `Y` → `Enter`
 
-### Step 7 — Start the bot
+### Step 8 — Start the bot
 
 ```bash
 ssh root@YOUR_SERVER_IP 'systemctl start nutrition-bot'
@@ -101,7 +130,7 @@ You should see `Active: active (running)` in green.
 
 Send `/start` to your bot in Telegram — it should respond immediately. 🎉
 
-### Step 8 — Save your server address (optional convenience)
+### Step 9 — Save your server address (optional convenience)
 
 To avoid typing your server address every time you deploy:
 

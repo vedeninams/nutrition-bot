@@ -1,16 +1,24 @@
 #!/bin/bash
 # server_setup.sh — Run this ONCE on your Hetzner server to set everything up.
 #
-# Before running: make sure your GitHub repo URL is ready.
-# Usage: bash server_setup.sh https://github.com/YOUR_USERNAME/nutrition-bot
+# IMPORTANT: Use the SSH URL for private repos (not the HTTPS URL).
+# Usage: bash server_setup.sh git@github.com:YOUR_USERNAME/nutrition-bot.git
 #
-# Example: bash server_setup.sh https://github.com/maria/nutrition-bot
+# Example: bash server_setup.sh git@github.com:vedeninams/nutrition-bot.git
+#
+# Before running this, make sure you have:
+#   1. Generated an SSH deploy key on the server
+#   2. Added the public key to GitHub → repo Settings → Deploy keys
+# See DEPLOY.md for the exact steps.
 
 set -e
 
 GITHUB_REPO="${1}"
 if [ -z "$GITHUB_REPO" ]; then
-    echo "Usage: bash server_setup.sh https://github.com/YOUR_USERNAME/nutrition-bot"
+    echo "Usage: bash server_setup.sh git@github.com:YOUR_USERNAME/nutrition-bot.git"
+    echo ""
+    echo "Note: use the SSH URL (git@github.com:...), not the HTTPS URL."
+    echo "See DEPLOY.md for deploy key setup instructions."
     exit 1
 fi
 
