@@ -484,7 +484,15 @@ async def run_daily_summary():
     from telegram import Bot
     bot = Bot(token=BOT_TOKEN)
     await _push_to_all_users(advisor.daily_morning_summary, bot)
-    log.info("Daily summary sent.")
+    log.info("Daily morning summary sent.")
+
+
+async def run_evening_summary():
+    """21:00 push — today's food log + how you stand vs goal."""
+    from telegram import Bot
+    bot = Bot(token=BOT_TOKEN)
+    await _push_to_all_users(advisor.today_summary, bot)
+    log.info("Evening summary sent.")
 
 
 async def run_weekly_review():
@@ -504,6 +512,9 @@ def main():
     # CLI flags for cron jobs
     if "--daily-summary" in sys.argv:
         asyncio.run(run_daily_summary())
+        return
+    if "--evening-summary" in sys.argv:
+        asyncio.run(run_evening_summary())
         return
     if "--weekly-review" in sys.argv:
         asyncio.run(run_weekly_review())
