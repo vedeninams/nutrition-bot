@@ -126,11 +126,17 @@ def _fmt_totals(totals: dict, goal: int) -> str:
     kcal = totals.get("kcal", 0)
     pct = int(kcal / goal * 100) if goal else 0
     bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+    remaining = goal - kcal
+    if remaining > 0:
+        remaining_str = f"✳️ *{remaining:.0f} kcal left today*"
+    else:
+        remaining_str = f"🚫 *{abs(remaining):.0f} kcal over goal*"
     return (
         f"🔢 {kcal:.0f} / {goal} kcal  [{bar}] {pct}%\n"
         f"🥩 Protein: {totals.get('protein_g', 0):.0f}g  "
         f"🧈 Fat: {totals.get('fat_g', 0):.0f}g  "
-        f"🌾 Carbs: {totals.get('carbs_g', 0):.0f}g"
+        f"🌾 Carbs: {totals.get('carbs_g', 0):.0f}g\n"
+        + remaining_str
     )
 
 
