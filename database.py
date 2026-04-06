@@ -1,0 +1,553 @@
+"""
+database.py — SQLite foundation for the Nutrition Bot.
+
+Handles all data storage: meals, user settings, and goals.
+Every other module imports from here — nothing else touches the DB directly.
+"""
+
+import sqlite3
+import os
+from datetime import datetime, date, timedelta
+from typing import Optional
+
+DB_PATH = os.getenv("NUTRITION_DB_PATH", "nutrition.db")
+
+
+def get_conn() -> sqlite3.Connection:
+    """Return a connection with row_factory so rows behave like dicts."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")   # safer concurrent writes
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+def init_db():
+    """Create all tables if they don't exist yet. Safe to call on every startup."""
+    conn = get_conn()
+    with conn:
+        conn.executescript("""
+            -- ─────────────────────────────────────────────
+            -- User settings & goals
+            -- ─────────────────────────────────────────────
+            CREATE TABLE IF NOT EXISTS users (
+                user_id         INTEGER PRIMARY KEY,
+                daily_kcal      INTEGER DEFAULT 2000,
+                language        TEXT    DEFAULT 'en',
+                timezone        TEXT    DEFAULT 'Europe/Berlin',
+                created_at      TEXT    DEFAULT (datetime('now'))
+            );
+
+            -- ─────────────────────────────────────────────
+            -- Individual logged items
+            -- Each photo / text message → one or more rows
+            -- ─────────────────────────────────────────────
+            CREATE TABLE IF NOT EXISTS meals (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id         INTEGER NOT NULL,
+                logged_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+                meal_type       TEXT    NOT NULL,   -- breakfast / lunch / dinner / snack
+                dish            TEXT    NOT NULL,   -- human-readable name ("Greek yogurt 150g")
+                kcal            REAL    DEFAULT 0,
+                protein_g       REAL    DEFAULT 0,
+                fat_g           REAL    DEFAULT 0,
+                carbs_g         REAL    DEFAULT 0,
+                sugar_g         REAL    DEFAULT 0,
+                confidence      TEXT    DEFAULT 'medium',  -- high / medium / low
+                source          TEXT    DEFAULT 'photo',   -- photo / label / text
+                notes           TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            );
+
+            -- Index for fast daily queries
+            CREATE INDEX IF NOT EXISTS idx_meals_user_date
+                ON meals (user_id, logged_at);
+
+            -- ─────────────────────────────────────────────
+            -- Correction log — keeps an audit trail
+            -- ─────────────────────────────────────────────
+            CREATE TABLE IF NOT EXISTS corrections (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                meal_id         INTEGER NOT NULL,
+                corrected_at    TEXT    DEFAULT (datetime('now')),
+                old_dish        TEXT,
+                old_kcal        REAL,
+                new_dish        TEXT,
+                new_kcal        REAL,
+                reason          TEXT,
+                FOREIGN KEY (meal_id) REFERENCES meals(id)
+            );
+
+            -- ─────────────────────────────────────────────
+            -- User profile — free-text persistent memory
+            -- One row per user, Claude maintains the text
+            -- ─────────────────────────────────────────────
+            CREATE TABLE IF NOT EXISTS user_profile (
+                user_id         INTEGER PRIMARY KEY,
+                profile         TEXT    DEFAULT '',
+                updated_at      TEXT    DEFAULT (datetime('now')),
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            );
+
+            -- ─────────────────────────────────────────────
+            -- Daily activity stats (from iPhone Shortcuts)
+            -- steps + weight from Health app
+            -- workouts from Calendar (JSON array)
+            -- ─────────────────────────────────────────────
+            CREATE TABLE IF NOT EXISTS daily_stats (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id         INTEGER NOT NULL,
+                date            TEXT    NOT NULL,           -- YYYY-MM-DD
+                steps           INTEGER,
+                weight_kg       REAL,
+                workouts        TEXT    DEFAULT '[]',       -- JSON: [{type, duration_min, kcal_est}]
+                kcal_burned_est REAL,                       -- total estimated burn (walk + workouts)
+                updated_at      TEXT    DEFAULT (datetime('now')),
+                UNIQUE(user_id, date),
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_daily_stats_user_date
+                ON daily_stats (user_id, date);
+        """)
+    conn.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# User helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def ensure_user(user_id: int):
+    """Create user row if it doesn't exist yet."""
+    conn = get_conn()
+    with conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO users (user_id) VALUES (?)",
+            (user_id,)
+        )
+    conn.close()
+
+
+def get_user(user_id: int) -> Optional[dict]:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM users WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def set_daily_goal(user_id: int, kcal: int):
+    ensure_user(user_id)
+    conn = get_conn()
+    with conn:
+        conn.execute(
+            "UPDATE users SET daily_kcal = ? WHERE user_id = ?",
+            (kcal, user_id)
+        )
+    conn.close()
+
+
+def set_language(user_id: int, lang: str):
+    ensure_user(user_id)
+    conn = get_conn()
+    with conn:
+        conn.execute(
+            "UPDATE users SET language = ? WHERE user_id = ?",
+            (lang, user_id)
+        )
+    conn.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Meal classification
+# ─────────────────────────────────────────────────────────────────────────────
+
+def classify_meal_type(hour: int, kcal: float) -> str:
+    """
+    Guess breakfast/lunch/dinner/snack from the time of day.
+    Rules (can be overridden by the user later):
+      05–10  → breakfast
+      11–14  → lunch
+      17–21  → dinner
+      everything else, or low-cal → snack
+    """
+    if kcal < 80:
+        return "snack"
+    if 5 <= hour < 11:
+        return "breakfast"
+    if 11 <= hour < 15:
+        return "lunch"
+    if 17 <= hour < 22:
+        return "dinner"
+    return "snack"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Logging meals
+# ─────────────────────────────────────────────────────────────────────────────
+
+def log_meal(
+    user_id: int,
+    dish: str,
+    kcal: float,
+    protein_g: float = 0,
+    fat_g: float = 0,
+    carbs_g: float = 0,
+    sugar_g: float = 0,
+    confidence: str = "medium",
+    source: str = "photo",
+    meal_type: Optional[str] = None,
+    notes: Optional[str] = None,
+) -> int:
+    """
+    Insert one meal row and return its id.
+    meal_type is auto-classified if not provided.
+    """
+    ensure_user(user_id)
+    now = datetime.now()
+    if meal_type is None:
+        meal_type = classify_meal_type(now.hour, kcal)
+
+    conn = get_conn()
+    with conn:
+        cur = conn.execute(
+            """INSERT INTO meals
+               (user_id, logged_at, meal_type, dish, kcal,
+                protein_g, fat_g, carbs_g, sugar_g,
+                confidence, source, notes)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                user_id, now.isoformat(), meal_type, dish, kcal,
+                protein_g, fat_g, carbs_g, sugar_g,
+                confidence, source, notes
+            )
+        )
+        meal_id = cur.lastrowid
+    conn.close()
+    return meal_id
+
+
+def log_meal_items(user_id: int, items: list[dict], source: str = "photo") -> list[int]:
+    """
+    Log multiple items from one meal (e.g. a plate with 3 components).
+    Each item is a dict with keys: dish, kcal, protein_g, fat_g, carbs_g, sugar_g, confidence.
+    Returns list of inserted ids.
+    """
+    ids = []
+    for item in items:
+        meal_id = log_meal(
+            user_id=user_id,
+            dish=item.get("dish", "Unknown"),
+            kcal=item.get("kcal", 0),
+            protein_g=item.get("protein_g", 0),
+            fat_g=item.get("fat_g", 0),
+            carbs_g=item.get("carbs_g", 0),
+            sugar_g=item.get("sugar_g", 0),
+            confidence=item.get("confidence", "medium"),
+            source=source,
+            meal_type=item.get("meal_type"),
+            notes=item.get("notes"),
+        )
+        ids.append(meal_id)
+    return ids
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Corrections
+# ─────────────────────────────────────────────────────────────────────────────
+
+def update_meal(meal_id: int, updates: dict, reason: str = "") -> bool:
+    """
+    Update fields on an existing meal row.
+    Also writes a correction log entry for the audit trail.
+    Returns True if a row was actually updated.
+    """
+    conn = get_conn()
+    old = conn.execute("SELECT * FROM meals WHERE id = ?", (meal_id,)).fetchone()
+    if not old:
+        conn.close()
+        return False
+
+    # Build dynamic UPDATE
+    allowed = {"dish", "kcal", "protein_g", "fat_g", "carbs_g", "sugar_g",
+                "confidence", "meal_type", "notes"}
+    fields = {k: v for k, v in updates.items() if k in allowed}
+    if not fields:
+        conn.close()
+        return False
+
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    values = list(fields.values()) + [meal_id]
+
+    with conn:
+        conn.execute(f"UPDATE meals SET {set_clause} WHERE id = ?", values)
+        conn.execute(
+            """INSERT INTO corrections
+               (meal_id, old_dish, old_kcal, new_dish, new_kcal, reason)
+               VALUES (?,?,?,?,?,?)""",
+            (
+                meal_id,
+                old["dish"], old["kcal"],
+                fields.get("dish", old["dish"]),
+                fields.get("kcal", old["kcal"]),
+                reason,
+            )
+        )
+    conn.close()
+    return True
+
+
+def delete_meal(meal_id: int) -> bool:
+    """Soft-delete by marking confidence='deleted'. Keeps data for audit."""
+    conn = get_conn()
+    with conn:
+        cur = conn.execute(
+            "UPDATE meals SET confidence = 'deleted' WHERE id = ?", (meal_id,)
+        )
+    conn.close()
+    return cur.rowcount > 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Queries
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_today_meals(user_id: int) -> list[dict]:
+    """All non-deleted meals logged today (calendar day in server time)."""
+    today = date.today().isoformat()
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT * FROM meals
+           WHERE user_id = ?
+             AND date(logged_at) = ?
+             AND confidence != 'deleted'
+           ORDER BY logged_at""",
+        (user_id, today)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_today_totals(user_id: int) -> dict:
+    """Summed macros for today."""
+    today = date.today().isoformat()
+    conn = get_conn()
+    row = conn.execute(
+        """SELECT
+               COALESCE(SUM(kcal), 0)      AS kcal,
+               COALESCE(SUM(protein_g), 0) AS protein_g,
+               COALESCE(SUM(fat_g), 0)     AS fat_g,
+               COALESCE(SUM(carbs_g), 0)   AS carbs_g,
+               COALESCE(SUM(sugar_g), 0)   AS sugar_g,
+               COUNT(*)                    AS items
+           FROM meals
+           WHERE user_id = ?
+             AND date(logged_at) = ?
+             AND confidence != 'deleted'""",
+        (user_id, today)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else {}
+
+
+def get_recent_meals(user_id: int, limit: int = 5) -> list[dict]:
+    """Last N meals — used for natural-language correction context."""
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT * FROM meals
+           WHERE user_id = ? AND confidence != 'deleted'
+           ORDER BY logged_at DESC LIMIT ?""",
+        (user_id, limit)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_week_totals(user_id: int) -> list[dict]:
+    """Daily totals for the past 7 days — used for weekly review."""
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT
+               date(logged_at) AS day,
+               COALESCE(SUM(kcal), 0)      AS kcal,
+               COALESCE(SUM(protein_g), 0) AS protein_g,
+               COALESCE(SUM(fat_g), 0)     AS fat_g,
+               COALESCE(SUM(carbs_g), 0)   AS carbs_g
+           FROM meals
+           WHERE user_id = ?
+             AND date(logged_at) >= date('now', '-6 days')
+             AND confidence != 'deleted'
+           GROUP BY day
+           ORDER BY day""",
+        (user_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_meal_by_id(meal_id: int) -> Optional[dict]:
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM meals WHERE id = ?", (meal_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# User profile — free-text persistent memory maintained by Claude
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_profile(user_id: int) -> str:
+    """Return the raw profile text for this user (empty string if none)."""
+    ensure_user(user_id)
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT profile FROM user_profile WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    conn.close()
+    return row["profile"] if row else ""
+
+
+def save_profile(user_id: int, profile_text: str):
+    """Upsert the free-text profile for a user."""
+    ensure_user(user_id)
+    conn = get_conn()
+    with conn:
+        conn.execute(
+            """INSERT INTO user_profile (user_id, profile, updated_at)
+               VALUES (?, ?, datetime('now'))
+               ON CONFLICT(user_id) DO UPDATE SET
+                 profile = excluded.profile,
+                 updated_at = excluded.updated_at""",
+            (user_id, profile_text)
+        )
+    conn.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Daily activity stats — from iPhone Shortcuts
+# ─────────────────────────────────────────────────────────────────────────────
+
+def upsert_daily_stats(
+    user_id: int,
+    date_str: str,
+    steps: Optional[int] = None,
+    weight_kg: Optional[float] = None,
+    workouts: Optional[list] = None,
+    kcal_burned_est: Optional[float] = None,
+):
+    """
+    Insert or update the daily activity record for a given date.
+    Only updates fields that are explicitly passed (None = leave existing value).
+    """
+    ensure_user(user_id)
+    import json as _json
+    conn = get_conn()
+
+    # Load existing row so we can merge rather than overwrite with NULLs
+    existing = conn.execute(
+        "SELECT * FROM daily_stats WHERE user_id = ? AND date = ?",
+        (user_id, date_str)
+    ).fetchone()
+
+    if existing:
+        updates = {}
+        if steps is not None:
+            updates["steps"] = steps
+        if weight_kg is not None:
+            updates["weight_kg"] = weight_kg
+        if workouts is not None:
+            updates["workouts"] = _json.dumps(workouts)
+        if kcal_burned_est is not None:
+            updates["kcal_burned_est"] = kcal_burned_est
+        if updates:
+            updates["updated_at"] = "datetime('now')"
+            set_clause = ", ".join(
+                f"{k} = datetime('now')" if v == "datetime('now')" else f"{k} = ?"
+                for k, v in updates.items()
+            )
+            values = [v for v in updates.values() if v != "datetime('now')"]
+            values += [user_id, date_str]
+            with conn:
+                conn.execute(
+                    f"UPDATE daily_stats SET {set_clause} WHERE user_id = ? AND date = ?",
+                    values
+                )
+    else:
+        with conn:
+            conn.execute(
+                """INSERT INTO daily_stats
+                   (user_id, date, steps, weight_kg, workouts, kcal_burned_est)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    user_id, date_str, steps, weight_kg,
+                    _json.dumps(workouts) if workouts is not None else "[]",
+                    kcal_burned_est,
+                )
+            )
+    conn.close()
+
+
+def get_daily_stats(user_id: int, date_str: str) -> Optional[dict]:
+    """Return the activity record for one day, or None."""
+    import json as _json
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM daily_stats WHERE user_id = ? AND date = ?",
+        (user_id, date_str)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    r = dict(row)
+    try:
+        r["workouts"] = _json.loads(r.get("workouts") or "[]")
+    except Exception:
+        r["workouts"] = []
+    return r
+
+
+def get_week_stats(user_id: int) -> list[dict]:
+    """Activity records for the past 7 days (may have gaps if not all days logged)."""
+    import json as _json
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT * FROM daily_stats
+           WHERE user_id = ? AND date >= date('now', '-6 days')
+           ORDER BY date""",
+        (user_id,)
+    ).fetchall()
+    conn.close()
+    result = []
+    for row in rows:
+        r = dict(row)
+        try:
+            r["workouts"] = _json.loads(r.get("workouts") or "[]")
+        except Exception:
+            r["workouts"] = []
+        result.append(r)
+    return result
+
+
+def get_latest_weight(user_id: int) -> Optional[float]:
+    """Most recently recorded weight for this user."""
+    conn = get_conn()
+    row = conn.execute(
+        """SELECT weight_kg FROM daily_stats
+           WHERE user_id = ? AND weight_kg IS NOT NULL
+           ORDER BY date DESC LIMIT 1""",
+        (user_id,)
+    ).fetchone()
+    conn.close()
+    return row["weight_kg"] if row else None
+
+
+def get_profile_for_prompt(user_id: int) -> str:
+    """
+    Return the profile as a short block ready to inject into prompts.
+    Returns empty string if no profile saved yet.
+    """
+    profile = get_profile(user_id)
+    if not profile or not profile.strip():
+        return ""
+    return f"What I know about this user:\n{profile}"

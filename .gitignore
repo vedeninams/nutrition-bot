@@ -1,0 +1,21 @@
+# Secrets
+.env
+*.env
+
+# Database (stays on the server, not in git)
+*.db
+*.sqlite
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
