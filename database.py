@@ -551,3 +551,41 @@ def get_profile_for_prompt(user_id: int) -> str:
     if not profile or not profile.strip():
         return ""
     return f"What I know about this user:\n{profile}"
+
+
+def get_last_meal_batch(user_id: int, window_seconds: int = 120) -> list[dict]:
+    """
+    Return all non-deleted meal items that were logged in the same
+    'batch' as the most recent item — i.e. within window_seconds of it.
+
+    When the user sends a photo of a full plate, all 6 components are
+    logged within a second of each other.  This function finds that cluster
+    so we can tell Claude exactly which IDs form "this dish".
+    """
+    conn = get_conn()
+
+    # Find the timestamp of the most recently logged item
+    latest_row = conn.execute(
+        """SELECT logged_at FROM meals
+           WHERE user_id = ? AND confidence != 'deleted'
+           ORDER BY logged_at DESC LIMIT 1""",
+        (user_id,)
+    ).fetchone()
+
+    if not latest_row:
+        conn.close()
+        return []
+
+    latest_ts = latest_row["logged_at"]
+
+    # Fetch all items within window_seconds of that timestamp
+    rows = conn.execute(
+        """SELECT * FROM meals
+           WHERE user_id = ?
+             AND confidence != 'deleted'
+             AND ABS(strftime('%s', logged_at) - strftime('%s', ?)) <= ?
+           ORDER BY logged_at""",
+        (user_id, latest_ts, window_seconds)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]

@@ -251,39 +251,72 @@ CORRECTION_SYSTEM_PROMPT = """You are a nutritionist assistant helping the user 
 The user will describe what needs to change in plain language.
 You have the recent meal history shown below.
 
+{batch_section}
+
 FOUR types of corrections are possible:
 
 1. Single item correction — changing quantity, name, or calories of one specific item:
-   Return: {"action": "update", "meal_id": <id>, "updates": {"dish": ..., "kcal": ..., etc}, "reason": "..."}
+   Return: {{"action": "update", "meal_id": <id>, "updates": {{"dish": ..., "kcal": ..., etc}}, "reason": "..."}}
 
 2. Meal type reclassification — user says a group of items was breakfast/lunch/dinner/snack:
-   Return: {"action": "update_many", "meal_ids": [<id1>, <id2>, ...], "updates": {"meal_type": "breakfast"}, "reason": "..."}
+   Return: {{"action": "update_many", "meal_ids": [<id1>, <id2>, ...], "updates": {{"meal_type": "breakfast"}}, "reason": "..."}}
    Use this when the user says things like "those were for breakfast", "that was my lunch", "update all to dinner".
    Include ALL meal ids that belong to that group (typically items logged close together in time).
 
 3. Delete a single item:
-   Return: {"action": "delete", "meal_id": <id>, "updates": {}, "reason": "..."}
+   Return: {{"action": "delete", "meal_id": <id>, "updates": {{}}, "reason": "..."}}
 
 4. Delete multiple items — user wants to remove a group of recently logged entries:
-   Return: {"action": "delete_many", "meal_ids": [<id1>, <id2>, ...], "updates": {}, "reason": "..."}
+   Return: {{"action": "delete_many", "meal_ids": [<id1>, <id2>, ...], "updates": {{}}, "reason": "..."}}
    Use this when the user says things like "remove those 6 entries", "delete all of that", "remove the dish I just added",
-   "delete everything I just logged", "remove all those items". Group items logged close together in time.
+   "delete everything I just logged", "remove all those items", "remove this", "that was wrong".
+   When the LAST BATCH section is present and the user is asking to remove something recent, use ALL ids from that batch.
 
 If you cannot match to any meal:
-   Return: {"action": "none", "meal_id": null, "updates": {}, "reason": "Could not identify meal"}
+   Return: {{"action": "none", "meal_id": null, "updates": {{}}, "reason": "Could not identify meal"}}
 
 Meal history (JSON):
 {history}
 """
 
-def resolve_correction(user_message: str, recent_meals: list[dict]) -> dict:
+def resolve_correction(
+    user_message: str,
+    recent_meals: list[dict],
+    last_batch: Optional[list[dict]] = None,
+) -> dict:
     """
     Given a correction message like "it was a whole avocado not half",
     figure out which meal_id to update and what to change.
+
+    last_batch: items from the most recent 'logging session' (same photo/message).
+                When provided, the prompt explicitly highlights them so Claude
+                knows exactly which IDs form "the dish I just added".
+
     Returns a dict with: meal_id, updates, reason, action.
     """
     history_json = json.dumps(recent_meals, indent=2, default=str)
-    system = CORRECTION_SYSTEM_PROMPT.replace("{history}", history_json)
+
+    # Build the batch section shown at the top of the prompt
+    if last_batch and len(last_batch) > 1:
+        batch_ids = [item["id"] for item in last_batch]
+        batch_names = ", ".join(item.get("dish", "?") for item in last_batch)
+        batch_section = (
+            f"LAST LOGGED BATCH — these {len(last_batch)} items were logged together "
+            f"(same photo/message) and form ONE dish/meal:\n"
+            f"  IDs: {batch_ids}\n"
+            f"  Items: {batch_names}\n\n"
+            f"If the user says 'remove this dish', 'remove what I just added', "
+            f"'that was wrong', 'delete all of that', or similar, "
+            f"use delete_many with ALL of these IDs."
+        )
+    else:
+        batch_section = ""
+
+    system = (
+        CORRECTION_SYSTEM_PROMPT
+        .replace("{batch_section}", batch_section)
+        .replace("{history}", history_json)
+    )
 
     # Haiku — fast and cheap for text/JSON matching
     response = client.messages.create(

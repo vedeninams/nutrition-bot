@@ -362,7 +362,11 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        result = analyzer.resolve_correction(text, recent)
+        # Pass the most recent logging batch (e.g. 6 items from one photo)
+        # so Claude knows exactly which IDs form "this dish I just added"
+        last_batch = db.get_last_meal_batch(user_id, window_seconds=120)
+
+        result = analyzer.resolve_correction(text, recent, last_batch=last_batch)
         action = result.get("action", "none")
 
         if action == "none":
