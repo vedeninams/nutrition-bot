@@ -395,138 +395,93 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # so Claude knows exactly which IDs form "this dish I just added"
         last_batch = db.get_last_meal_batch(user_id, window_seconds=120)
 
-        result = analyzer.resolve_correction(text, recent, last_batch=last_batch)
-        action = result.get("action", "none")
+        # resolve_correction now returns a LIST — one action per requested change
+        results = analyzer.resolve_correction(text, recent, last_batch=last_batch)
 
-        if action == "none":
+        # Filter out "none" actions before processing
+        valid_results = [r for r in results if r.get("action", "none") != "none"]
+
+        if not valid_results:
             await update.message.reply_text(
                 "🤔 I'm not sure which meal you want to change. "
-                "Try being more specific, e.g. \"The yogurt I logged this morning — it was 200g, not 100g.\""
+                "Try being more specific, e.g. \"The feta — it was 70g not 80g. Also remove the hummus.\""
             )
             return
 
-        # ── Bulk meal type reclassification (e.g. "those were my breakfast") ──
-        if action == "update_many":
-            meal_ids = result.get("meal_ids", [])
-            updates = result.get("updates", {})
-            if not meal_ids or not updates:
-                await update.message.reply_text("🤔 I couldn't figure out which items to update.")
-                return
-            updated = sum(1 for mid in meal_ids if db.update_meal(mid, updates, reason=result.get("reason", "")))
-            meal_type = updates.get("meal_type", "")
-            meal_emoji = {"breakfast": "🌅", "lunch": "☀️", "dinner": "🌙", "snack": "🍎"}.get(meal_type, "🍽")
-            totals = db.get_today_totals(user_id)
-            user_data = db.get_user(user_id) or {}
-            goal = user_data.get("daily_kcal", 2000)
-            await update.message.reply_text(
-                f"✅ Updated {updated} items → {meal_emoji} *{meal_type}*\n\n"
-                + advisor._fmt_totals(totals, goal),
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            return
+        # Execute each correction in order, collect summary lines
+        reply_lines = []
+        user_data = db.get_user(user_id) or {}
+        goal = user_data.get("daily_kcal", 2000)
 
-        # ── Remove duplicates — keep first log, delete later repeats ─────────
-        if action == "delete_duplicates":
-            dish_name = result.get("dish_name", "")
-            if not dish_name:
-                await update.message.reply_text(
-                    "🤔 Which dish should I deduplicate? Try: \"remove duplicate Salad Bowl entries\"."
-                )
-                return
-            deleted = db.delete_duplicate_dishes(user_id, dish_name)
-            totals = db.get_today_totals(user_id)
-            user_data = db.get_user(user_id) or {}
-            goal = user_data.get("daily_kcal", 2000)
-            if deleted:
-                await update.message.reply_text(
-                    f"🗑 Removed {deleted} duplicate item{'s' if deleted != 1 else ''} of *{dish_name}* — kept the first log.\n\n"
-                    + advisor._fmt_totals(totals, goal),
-                    parse_mode=ParseMode.MARKDOWN,
-                )
-            else:
-                await update.message.reply_text(
-                    f"No duplicates found for *{dish_name}* today.",
-                    parse_mode=ParseMode.MARKDOWN,
-                )
-            return
+        for result in valid_results:
+            action = result.get("action", "none")
 
-        # ── Scale whole dish (e.g. "I only ate half") ────────────────────────
-        if action == "scale_dish":
-            dish_name = result.get("dish_name", "")
-            factor = float(result.get("factor", 1.0))
-            if not dish_name or not (0.05 <= factor <= 0.99):
-                await update.message.reply_text(
-                    "🤔 I couldn't figure out which dish or how much to adjust."
-                )
-                return
-            updated = db.scale_dish_items(user_id, dish_name, factor)
-            pct = int(factor * 100)
-            totals = db.get_today_totals(user_id)
-            user_data = db.get_user(user_id) or {}
-            goal = user_data.get("daily_kcal", 2000)
-            await update.message.reply_text(
-                f"✏️ Adjusted *{dish_name}* to {pct}% ({updated} ingredient{'s' if updated != 1 else ''} scaled).\n\n"
-                + advisor._fmt_totals(totals, goal),
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            return
+            # ── Bulk meal type reclassification ──────────────────────────────
+            if action == "update_many":
+                meal_ids = result.get("meal_ids", [])
+                updates = result.get("updates", {})
+                if meal_ids and updates:
+                    updated = sum(1 for mid in meal_ids if db.update_meal(mid, updates, reason=result.get("reason", "")))
+                    meal_type = updates.get("meal_type", "")
+                    meal_emoji = {"breakfast": "🌅", "lunch": "☀️", "dinner": "🌙", "snack": "🍎"}.get(meal_type, "🍽")
+                    reply_lines.append(f"✅ Updated {updated} items → {meal_emoji} *{meal_type}*")
 
-        meal_id = result.get("meal_id")
+            # ── Remove duplicates ─────────────────────────────────────────────
+            elif action == "delete_duplicates":
+                dish_name = result.get("dish_name", "")
+                if dish_name:
+                    deleted = db.delete_duplicate_dishes(user_id, dish_name)
+                    if deleted:
+                        reply_lines.append(f"🗑 Removed {deleted} duplicate(s) of *{dish_name}* — kept first log")
+                    else:
+                        reply_lines.append(f"No duplicates found for *{dish_name}*")
 
-        if action == "delete_many":
-            meal_ids = result.get("meal_ids", [])
-            dish_name = result.get("dish_name")  # prefer dish_name deletion if given
-            user_data = db.get_user(user_id) or {}
-            goal = user_data.get("daily_kcal", 2000)
+            # ── Scale whole dish ──────────────────────────────────────────────
+            elif action == "scale_dish":
+                dish_name = result.get("dish_name", "")
+                factor = float(result.get("factor", 1.0))
+                if dish_name and 0.05 <= factor <= 0.99:
+                    updated = db.scale_dish_items(user_id, dish_name, factor)
+                    reply_lines.append(f"✏️ *{dish_name}* adjusted to {int(factor*100)}%")
 
-            if dish_name:
-                # Delete all items that share this dish_name — most reliable
-                deleted = db.delete_by_dish_name(user_id, dish_name)
-                label = f" *{dish_name}*" if dish_name else ""
-            else:
-                # Fall back to deleting by explicit IDs
-                deleted = sum(1 for mid in meal_ids if db.delete_meal(mid))
-                label = ""
+            # ── Delete multiple items ─────────────────────────────────────────
+            elif action == "delete_many":
+                meal_ids = result.get("meal_ids", [])
+                dish_name = result.get("dish_name")
+                if dish_name:
+                    deleted = db.delete_by_dish_name(user_id, dish_name)
+                    reply_lines.append(f"🗑 Removed *{dish_name}* ({deleted} items)")
+                elif meal_ids:
+                    deleted = sum(1 for mid in meal_ids if db.delete_meal(mid))
+                    reply_lines.append(f"🗑 Removed {deleted} items")
 
-            totals = db.get_today_totals(user_id)
-            await update.message.reply_text(
-                f"🗑 Removed{label} ({deleted} item{'s' if deleted != 1 else ''}).\n\n"
-                + advisor._fmt_totals(totals, goal),
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            return
+            # ── Delete single item ────────────────────────────────────────────
+            elif action == "delete":
+                meal_id = result.get("meal_id")
+                meal = db.get_meal_by_id(meal_id) if meal_id else None
+                if db.delete_meal(meal_id):
+                    name = meal.get("dish", "item") if meal else "item"
+                    reply_lines.append(f"🗑 Removed *{name}*")
+                else:
+                    reply_lines.append("⚠️ Couldn't find that entry to remove")
 
-        if action == "delete":
-            ok = db.delete_meal(meal_id)
-            if ok:
-                totals = db.get_today_totals(user_id)
-                user_data = db.get_user(user_id) or {}
-                goal = user_data.get("daily_kcal", 2000)
-                await update.message.reply_text(
-                    "🗑 Removed.\n\n" + advisor._fmt_totals(totals, goal),
-                    parse_mode=ParseMode.MARKDOWN,
-                )
-            else:
-                await update.message.reply_text("Couldn't find that entry to remove.")
-            return
+            # ── Update single item ────────────────────────────────────────────
+            elif action == "update":
+                meal_id = result.get("meal_id")
+                updates = result.get("updates", {})
+                if db.update_meal(meal_id, updates, reason=result.get("reason", "")):
+                    meal = db.get_meal_by_id(meal_id)
+                    name = meal.get("dish", "item") if meal else "item"
+                    new_kcal = meal.get("kcal", "?") if meal else "?"
+                    reply_lines.append(f"✏️ *{name}* → {new_kcal:.0f} kcal")
+                else:
+                    reply_lines.append("⚠️ Couldn't find that entry to update")
 
-        if action == "update":
-            updates = result.get("updates", {})
-            ok = db.update_meal(meal_id, updates, reason=result.get("reason", ""))
-            if ok:
-                meal = db.get_meal_by_id(meal_id)
-                new_kcal = meal.get("kcal", "?") if meal else "?"
-                totals = db.get_today_totals(user_id)
-                user_data = db.get_user(user_id) or {}
-                goal = user_data.get("daily_kcal", 2000)
-                await update.message.reply_text(
-                    f"✏️ Updated! *{meal['dish'] if meal else 'Entry'}* → {new_kcal} kcal\n\n"
-                    + advisor._fmt_totals(totals, goal),
-                    parse_mode=ParseMode.MARKDOWN,
-                )
-            else:
-                await update.message.reply_text("Couldn't find that entry to update.")
-            return
+        # Send one combined reply with all changes + updated totals
+        totals = db.get_today_totals(user_id)
+        combined = "\n".join(reply_lines) + f"\n\n{advisor._fmt_totals(totals, goal)}"
+        await update.message.reply_text(_safe_reply(combined), parse_mode=ParseMode.MARKDOWN)
+        return
 
     # ── Question ─────────────────────────────────────────────────────────────
     if intent == "question":

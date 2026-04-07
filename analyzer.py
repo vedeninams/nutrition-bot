@@ -270,13 +270,17 @@ def analyze_text(text: str) -> list[dict]:
 
 CORRECTION_SYSTEM_PROMPT = """You are a nutritionist assistant helping the user correct logged meal entries.
 
-The user will describe what needs to change in plain language.
+The user may request ONE or MULTIPLE corrections in a single message (e.g. "change feta to 70g and remove hummus").
 You have the recent meal history shown below. Each item has a dish_name (the whole dish)
 and a dish (the individual ingredient).
 
 {batch_section}
 
-FOUR types of corrections are possible:
+Return a JSON ARRAY — one object per correction, even if there is only one.
+Example for two corrections: [{{...}}, {{...}}]
+Example for one correction: [{{...}}]
+
+The following action types are available:
 
 1. Single item correction — changing quantity, name, or calories of one specific item:
    Return: {{"action": "update", "meal_id": <id>, "updates": {{"dish": ..., "kcal": ..., etc}}, "reason": "..."}}
@@ -311,8 +315,10 @@ FOUR types of corrections are possible:
    "remove extra X logs", "I logged X twice", "remove duplicate entries".
    Match the dish_name exactly as it appears in the meal history.
 
-If you cannot match to any meal:
-   Return: {{"action": "none", "meal_id": null, "updates": {{}}, "reason": "Could not identify meal"}}
+If you cannot match a specific correction to any meal, include:
+   {{"action": "none", "meal_id": null, "updates": {{}}, "reason": "Could not identify meal"}}
+
+Always return a valid JSON array. No prose, no explanation outside the array.
 
 Meal history (JSON — includes dish_name field):
 {history}
@@ -322,16 +328,15 @@ def resolve_correction(
     user_message: str,
     recent_meals: list[dict],
     last_batch: Optional[list[dict]] = None,
-) -> dict:
+) -> list[dict]:
     """
-    Given a correction message like "it was a whole avocado not half",
-    figure out which meal_id to update and what to change.
+    Given a correction message (possibly containing multiple corrections),
+    return a LIST of action dicts — one per requested change.
 
-    last_batch: items from the most recent 'logging session' (same photo/message).
-                When provided, the prompt explicitly highlights them so Claude
-                knows exactly which IDs form "the dish I just added".
+    E.g. "change feta to 70g and remove hummus" → [update_action, delete_action]
 
-    Returns a dict with: meal_id, updates, reason, action.
+    last_batch: items from the most recent logging session (same photo).
+                Highlighted in the prompt so Claude knows what "this dish" means.
     """
     history_json = json.dumps(recent_meals, indent=2, default=str)
 
@@ -357,22 +362,25 @@ def resolve_correction(
         .replace("{history}", history_json)
     )
 
-    # Haiku — fast and cheap for text/JSON matching
     response = client.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=512,
+        max_tokens=800,
         system=system,
-        messages=[
-            {"role": "user", "content": user_message}
-        ],
+        messages=[{"role": "user", "content": user_message}],
     )
     text = response.content[0].text
     clean = re.sub(r"```(?:json)?", "", text).replace("```", "").strip()
 
     try:
-        return json.loads(clean)
+        parsed = json.loads(clean)
+        # Normalise: always return a list
+        if isinstance(parsed, dict):
+            return [parsed]
+        if isinstance(parsed, list):
+            return parsed
     except (json.JSONDecodeError, ValueError):
-        return {"meal_id": None, "updates": {}, "reason": "Parse error", "action": "none"}
+        pass
+    return [{"meal_id": None, "updates": {}, "reason": "Parse error", "action": "none"}]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
