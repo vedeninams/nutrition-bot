@@ -127,6 +127,8 @@ def _extract_json(text: str) -> list[dict]:
         for item in items:
             dish = str(item.get("dish", "Unknown"))
             dish_name = str(item.get("dish_name") or dish)  # fallback to dish if absent
+            # meal_type from caption always wins — kept as-is (string or None)
+            meal_type = item.get("meal_type") or None
             result.append({
                 "dish_name":  dish_name,
                 "dish":       dish,
@@ -136,6 +138,7 @@ def _extract_json(text: str) -> list[dict]:
                 "carbs_g":    float(item.get("carbs_g", 0)),
                 "sugar_g":    float(item.get("sugar_g", 0)),
                 "confidence": item.get("confidence", "medium"),
+                "meal_type":  meal_type,
             })
         return result
     except (json.JSONDecodeError, ValueError):
