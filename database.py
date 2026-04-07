@@ -206,9 +206,13 @@ def classify_meal_type(hour: int, kcal: float, total_dish_kcal: float = None) ->
         return "lunch"
     if 15 <= hour < 17:
         return "snack"
-    if 17 <= hour < 23:
-        return "dinner"
-    return "snack"  # 23:00–04:59 late night
+    if 17 <= hour < 21 and ref_kcal >= 300:
+        return "dinner"           # substantial meal in the evening
+    if 17 <= hour < 21 and ref_kcal < 300:
+        return "snack"            # light bite in the evening
+    if hour >= 21:
+        return "snack"            # anything after 21:00 → snack
+    return "snack"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
