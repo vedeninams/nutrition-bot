@@ -305,6 +305,12 @@ FOUR types of corrections are possible:
    Always return the dish_name exactly as it appears in the meal history.
    factor must be a decimal between 0.1 and 0.9.
 
+6. Remove duplicate logs of the same dish — keep the first occurrence, delete later ones:
+   Return: {{"action": "delete_duplicates", "dish_name": "<exact dish name>", "updates": {{}}, "reason": "..."}}
+   Use when the user says things like "remove duplicate salad bowl entries", "delete the duplicate X",
+   "remove extra X logs", "I logged X twice", "remove duplicate entries".
+   Match the dish_name exactly as it appears in the meal history.
+
 If you cannot match to any meal:
    Return: {{"action": "none", "meal_id": null, "updates": {{}}, "reason": "Could not identify meal"}}
 

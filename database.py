@@ -388,6 +388,41 @@ def clear_today(user_id: int) -> int:
     return cur.rowcount
 
 
+def delete_duplicate_dishes(user_id: int, dish_name: str) -> int:
+    """
+    Keep the FIRST logged batch of dish_name today, delete all subsequent ones.
+    'First batch' = items logged within 2 min of the earliest timestamp for that dish.
+    Returns count of deleted rows.
+    """
+    today = date.today().isoformat()
+    conn = get_conn()
+
+    first_row = conn.execute(
+        """SELECT MIN(logged_at) AS first_ts FROM meals
+           WHERE user_id = ? AND dish_name = ? AND date(logged_at) = ?
+             AND confidence != 'deleted'""",
+        (user_id, dish_name, today)
+    ).fetchone()
+
+    if not first_row or not first_row["first_ts"]:
+        conn.close()
+        return 0
+
+    first_ts = first_row["first_ts"]
+
+    # Delete anything with the same dish_name logged more than 2 min after the first
+    with conn:
+        cur = conn.execute(
+            """UPDATE meals SET confidence = 'deleted'
+               WHERE user_id = ? AND dish_name = ? AND date(logged_at) = ?
+                 AND confidence != 'deleted'
+                 AND (strftime('%s', logged_at) - strftime('%s', ?)) > 120""",
+            (user_id, dish_name, today, first_ts)
+        )
+    conn.close()
+    return cur.rowcount
+
+
 def delete_by_dish_name(user_id: int, dish_name: str) -> int:
     """
     Soft-delete all non-deleted items for this user that share the given dish_name.

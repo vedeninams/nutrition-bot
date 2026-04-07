@@ -407,6 +407,31 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        # ── Remove duplicates — keep first log, delete later repeats ─────────
+        if action == "delete_duplicates":
+            dish_name = result.get("dish_name", "")
+            if not dish_name:
+                await update.message.reply_text(
+                    "🤔 Which dish should I deduplicate? Try: \"remove duplicate Salad Bowl entries\"."
+                )
+                return
+            deleted = db.delete_duplicate_dishes(user_id, dish_name)
+            totals = db.get_today_totals(user_id)
+            user_data = db.get_user(user_id) or {}
+            goal = user_data.get("daily_kcal", 2000)
+            if deleted:
+                await update.message.reply_text(
+                    f"🗑 Removed {deleted} duplicate item{'s' if deleted != 1 else ''} of *{dish_name}* — kept the first log.\n\n"
+                    + advisor._fmt_totals(totals, goal),
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            else:
+                await update.message.reply_text(
+                    f"No duplicates found for *{dish_name}* today.",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            return
+
         # ── Scale whole dish (e.g. "I only ate half") ────────────────────────
         if action == "scale_dish":
             dish_name = result.get("dish_name", "")
