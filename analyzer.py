@@ -32,7 +32,12 @@ use that to adjust your estimates.
 
 IMPORTANT: You must reply with ONLY a JSON array. No prose, no explanation.
 Each element must have exactly these keys:
-  dish        — string, short name of the item (e.g. "Greek yogurt", "Banana 1 medium")
+  dish_name   — string, the NAME OF THE WHOLE DISH OR PLATE (e.g. "Udon Noodle Bowl",
+                "Caesar Salad", "Overnight Oats"). ALL components of the same plate
+                share the EXACT SAME dish_name. For a single standalone item (e.g. an
+                apple, a coffee) dish_name = dish.
+  dish        — string, the individual ingredient or component
+                (e.g. "Udon noodles 150g", "Soft-boiled egg", "Broth 200ml")
   kcal        — number (integer or float)
   protein_g   — number
   fat_g       — number
@@ -41,10 +46,12 @@ Each element must have exactly these keys:
   confidence  — one of: "high", "medium", "low"
   meal_type   — detect from the caption: "breakfast", "lunch", "dinner", "snack", or null if not mentioned
 
-Example:
+Example (a plate of udon + a side apple):
 [
-  {"dish": "Scrambled eggs (2 large)", "kcal": 182, "protein_g": 14, "fat_g": 13, "carbs_g": 1, "sugar_g": 0.4, "confidence": "high", "meal_type": "breakfast"},
-  {"dish": "Whole grain toast", "kcal": 80, "protein_g": 3, "fat_g": 1, "carbs_g": 15, "sugar_g": 1.5, "confidence": "medium", "meal_type": "breakfast"}
+  {"dish_name": "Udon Noodle Bowl", "dish": "Udon noodles 150g", "kcal": 220, "protein_g": 7, "fat_g": 1, "carbs_g": 44, "sugar_g": 2, "confidence": "high", "meal_type": "lunch"},
+  {"dish_name": "Udon Noodle Bowl", "dish": "Tofu 80g", "kcal": 90, "protein_g": 9, "fat_g": 5, "carbs_g": 2, "sugar_g": 0, "confidence": "high", "meal_type": "lunch"},
+  {"dish_name": "Udon Noodle Bowl", "dish": "Broth 200ml", "kcal": 30, "protein_g": 2, "fat_g": 0, "carbs_g": 4, "sugar_g": 1, "confidence": "medium", "meal_type": "lunch"},
+  {"dish_name": "Apple", "dish": "Apple 1 medium", "kcal": 80, "protein_g": 0, "fat_g": 0, "carbs_g": 21, "sugar_g": 15, "confidence": "high", "meal_type": "lunch"}
 ]
 
 If you genuinely cannot identify anything, return an empty array [].
@@ -56,11 +63,13 @@ The user may say how much of the product they consumed (e.g. "I ate half", "150g
 If no portion is specified, assume one standard serving as shown on the label.
 
 IMPORTANT: You must reply with ONLY a JSON array with ONE element.
-Keys: dish, kcal, protein_g, fat_g, carbs_g, sugar_g, confidence, meal_type
+Keys: dish_name, dish, kcal, protein_g, fat_g, carbs_g, sugar_g, confidence, meal_type
+dish_name — the product name from the label (e.g. "König Käse", "Alpro Soy Yogurt")
+dish      — same as dish_name for a packaged product (it's a single item)
 meal_type — detect from the caption: "breakfast", "lunch", "dinner", "snack", or null if not mentioned.
 confidence should be "high" if you could read the label clearly, "medium" otherwise.
 
-If the label is unreadable, return: [{"dish": "Unknown product", "kcal": 0, "protein_g": 0, "fat_g": 0, "carbs_g": 0, "sugar_g": 0, "confidence": "low", "meal_type": null}]
+If the label is unreadable, return: [{"dish_name": "Unknown product", "dish": "Unknown product", "kcal": 0, "protein_g": 0, "fat_g": 0, "carbs_g": 0, "sugar_g": 0, "confidence": "low", "meal_type": null}]
 """
 
 TEXT_SYSTEM_PROMPT = """You are a nutritionist. The user described food in text.
@@ -68,7 +77,11 @@ Estimate the nutritional values based on the description.
 If quantities are vague ("a bowl", "some"), make a realistic estimate for an average portion.
 
 IMPORTANT: Reply with ONLY a JSON array. Each element must have these keys:
-  dish, kcal, protein_g, fat_g, carbs_g, sugar_g, confidence, meal_type
+  dish_name   — the name of the whole dish/meal (e.g. "Oatmeal Bowl", "Caesar Salad").
+                All ingredients of the same dish share the SAME dish_name.
+                For a single standalone item, dish_name = dish.
+  dish        — the individual ingredient or item (e.g. "Rolled oats 80g", "Banana slices")
+  kcal, protein_g, fat_g, carbs_g, sugar_g, confidence, meal_type
 
 For meal_type detect it from the user's words:
 - "for breakfast", "breakfast" → "breakfast"
@@ -77,7 +90,13 @@ For meal_type detect it from the user's words:
 - "snack", "quick bite" → "snack"
 - If not mentioned, use null (the app will guess from time of day)
 
-Multiple items in one message → multiple elements in the array, all with the same meal_type.
+Example — "I had oatmeal with banana and honey, and also a coffee":
+[
+  {"dish_name": "Oatmeal Bowl", "dish": "Rolled oats 80g", "kcal": 300, "protein_g": 10, "fat_g": 5, "carbs_g": 54, "sugar_g": 1, "confidence": "medium", "meal_type": null},
+  {"dish_name": "Oatmeal Bowl", "dish": "Banana 1 medium", "kcal": 89, "protein_g": 1, "fat_g": 0, "carbs_g": 23, "sugar_g": 12, "confidence": "high", "meal_type": null},
+  {"dish_name": "Oatmeal Bowl", "dish": "Honey 1 tsp", "kcal": 21, "protein_g": 0, "fat_g": 0, "carbs_g": 6, "sugar_g": 6, "confidence": "high", "meal_type": null},
+  {"dish_name": "Coffee with milk", "dish": "Coffee with milk", "kcal": 30, "protein_g": 1, "fat_g": 1, "carbs_g": 3, "sugar_g": 3, "confidence": "medium", "meal_type": null}
+]
 """
 
 
@@ -106,8 +125,11 @@ def _extract_json(text: str) -> list[dict]:
         # Normalise keys — fill in missing ones with 0
         result = []
         for item in items:
+            dish = str(item.get("dish", "Unknown"))
+            dish_name = str(item.get("dish_name") or dish)  # fallback to dish if absent
             result.append({
-                "dish":       str(item.get("dish", "Unknown")),
+                "dish_name":  dish_name,
+                "dish":       dish,
                 "kcal":       float(item.get("kcal", 0)),
                 "protein_g":  float(item.get("protein_g", 0)),
                 "fat_g":      float(item.get("fat_g", 0)),
@@ -249,7 +271,8 @@ def analyze_text(text: str) -> list[dict]:
 CORRECTION_SYSTEM_PROMPT = """You are a nutritionist assistant helping the user correct logged meal entries.
 
 The user will describe what needs to change in plain language.
-You have the recent meal history shown below.
+You have the recent meal history shown below. Each item has a dish_name (the whole dish)
+and a dish (the individual ingredient).
 
 {batch_section}
 
@@ -258,24 +281,34 @@ FOUR types of corrections are possible:
 1. Single item correction — changing quantity, name, or calories of one specific item:
    Return: {{"action": "update", "meal_id": <id>, "updates": {{"dish": ..., "kcal": ..., etc}}, "reason": "..."}}
 
-2. Meal type reclassification — user says a group of items was breakfast/lunch/dinner/snack:
+2. Meal type reclassification — user says a dish was breakfast/lunch/dinner/snack:
    Return: {{"action": "update_many", "meal_ids": [<id1>, <id2>, ...], "updates": {{"meal_type": "breakfast"}}, "reason": "..."}}
-   Use this when the user says things like "those were for breakfast", "that was my lunch", "update all to dinner".
-   Include ALL meal ids that belong to that group (typically items logged close together in time).
+   Include ALL ids that share the same dish_name.
 
 3. Delete a single item:
    Return: {{"action": "delete", "meal_id": <id>, "updates": {{}}, "reason": "..."}}
 
-4. Delete multiple items — user wants to remove a group of recently logged entries:
-   Return: {{"action": "delete_many", "meal_ids": [<id1>, <id2>, ...], "updates": {{}}, "reason": "..."}}
-   Use this when the user says things like "remove those 6 entries", "delete all of that", "remove the dish I just added",
-   "delete everything I just logged", "remove all those items", "remove this", "that was wrong".
-   When the LAST BATCH section is present and the user is asking to remove something recent, use ALL ids from that batch.
+4. Delete a whole dish (all its ingredients) — user wants to remove a dish by name or a recent batch:
+   Return: {{"action": "delete_many", "meal_ids": [<id1>, <id2>, ...], "dish_name": "<dish name>", "updates": {{}}, "reason": "..."}}
+   Use when:
+   - User names a dish: "remove the udon noodles", "delete the salad" → find all ids with that dish_name
+   - User says "remove this dish", "delete what I just added", "that was wrong", "remove all of that"
+     → use ALL ids from the LAST LOGGED BATCH if present, or the most recent dish_name group
+
+5. Scale a whole dish by a fraction — user ate only part of it:
+   Return: {{"action": "scale_dish", "dish_name": "<dish name>", "factor": <number 0.1–0.9>, "updates": {{}}, "reason": "..."}}
+   Use when the user says things like:
+   - "I only ate half the udon bowl" → factor: 0.5
+   - "actually I had two thirds of the salad" → factor: 0.67
+   - "I only ate a quarter of that" → factor: 0.25
+   - "I had 3/4 of the dish" → factor: 0.75
+   Always return the dish_name exactly as it appears in the meal history.
+   factor must be a decimal between 0.1 and 0.9.
 
 If you cannot match to any meal:
    Return: {{"action": "none", "meal_id": null, "updates": {{}}, "reason": "Could not identify meal"}}
 
-Meal history (JSON):
+Meal history (JSON — includes dish_name field):
 {history}
 """
 

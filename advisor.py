@@ -144,31 +144,65 @@ def _fmt_totals(totals: dict, goal: int) -> str:
 # 1. Post-log confirmation message
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _fmt_dish_group(items: list[dict]) -> str:
+    """
+    Format a group of items that belong to the same dish.
+    Single-item dishes → one line.
+    Multi-ingredient dishes → dish name header + indented ingredient list.
+    """
+    dish_name = items[0].get("dish_name") or items[0].get("dish", "?")
+    total_kcal = sum(i.get("kcal", 0) for i in items)
+    total_protein = sum(i.get("protein_g", 0) for i in items)
+
+    if len(items) == 1:
+        emoji = _food_emoji(dish_name)
+        return (
+            f"{emoji} *{dish_name}* — {total_kcal:.0f} kcal — {total_protein:.0f}g protein"
+        )
+    else:
+        emoji = _food_emoji(dish_name)
+        header = f"{emoji} *{dish_name}* — {total_kcal:.0f} kcal — {total_protein:.0f}g protein"
+        ingredient_lines = "\n".join(
+            f"  · {i.get('dish', '?')} — {i.get('kcal', 0):.0f} kcal — {i.get('protein_g', 0):.0f}g protein"
+            for i in items
+        )
+        return f"{header}\n{ingredient_lines}"
+
+
 def log_confirmation(items: list[dict], user_id: int) -> str:
     """
     Return a friendly confirmation after logging food.
-    Shows what was logged + today's running total + optional alert.
+    Groups items by dish_name so multi-ingredient dishes show cleanly.
     """
     user = db.get_user(user_id) or {}
     goal = user.get("daily_kcal", 2000)
     totals = db.get_today_totals(user_id)
 
-    # Build the "logged" block
-    if len(items) == 1:
-        i = items[0]
-        emoji = _food_emoji(i["dish"])
+    # Group by dish_name
+    from collections import OrderedDict
+    groups: OrderedDict[str, list] = OrderedDict()
+    for i in items:
+        key = i.get("dish_name") or i.get("dish", "?")
+        groups.setdefault(key, []).append(i)
+
+    total_kcal = sum(i.get("kcal", 0) for i in items)
+    total_protein = sum(i.get("protein_g", 0) for i in items)
+
+    dish_blocks = "\n".join(_fmt_dish_group(g) for g in groups.values())
+
+    if len(groups) == 1 and len(items) == 1:
+        item_lines = f"✅ Logged:\n{dish_blocks}"
+    elif len(groups) == 1:
+        dish_name = list(groups.keys())[0]
         item_lines = (
-            f"✅ Logged: {emoji} *{i['dish']}*\n"
-            f"   {i['kcal']:.0f} kcal  —{i.get('protein_g', 0):.0f}g protein"
+            f"✅ Logged *{dish_name}* ({len(items)} ingredients, "
+            f"{total_kcal:.0f} kcal / {total_protein:.0f}g protein):\n{dish_blocks}"
         )
     else:
-        lines = "\n".join(
-            f"  {_food_emoji(i['dish'])} {i['dish']} — {i['kcal']:.0f} kcal  —{i.get('protein_g', 0):.0f}g protein"
-            for i in items
+        item_lines = (
+            f"✅ Logged {len(groups)} dish(es), {len(items)} item(s) total "
+            f"({total_kcal:.0f} kcal / {total_protein:.0f}g protein):\n{dish_blocks}"
         )
-        total_logged = sum(i["kcal"] for i in items)
-        total_protein = sum(i.get("protein_g", 0) for i in items)
-        item_lines = f"✅ Logged {len(items)} items ({total_logged:.0f} kcal  —{total_protein:.0f}g protein):\n{lines}"
 
     summary = f"\n\n{_fmt_totals(totals, goal)}"
 
@@ -451,21 +485,40 @@ def _fmt_activity(stats: dict) -> str:
 def today_summary(user_id: int) -> str:
     """
     On-demand summary of today's meals + activity if available.
+    Meals are grouped by dish_name so multi-ingredient dishes appear as one block.
     """
     user = db.get_user(user_id) or {}
     goal = user.get("daily_kcal", 2000)
-    meals = db.get_today_meals(user_id)
+    dish_groups = db.get_today_meals_grouped(user_id)
     totals = db.get_today_totals(user_id)
     activity = db.get_daily_stats(user_id, date.today().isoformat())
 
-    if not meals and not activity:
+    if not dish_groups and not activity:
         return "📋 Nothing logged yet today. Send me a photo of your food! 📸"
 
     parts = ["📋 *Today so far:*"]
 
-    if meals:
-        meal_lines = "\n".join(_fmt_meal(m) for m in meals)
-        parts.append(f"\n{meal_lines}\n\n{_fmt_totals(totals, goal)}")
+    if dish_groups:
+        # Group dishes by meal_type for a structured view
+        meal_order = ["breakfast", "lunch", "dinner", "snack"]
+        by_meal: dict[str, list] = {}
+        for group in dish_groups:
+            mt = group.get("meal_type", "snack")
+            by_meal.setdefault(mt, []).append(group)
+
+        meal_sections = []
+        for mt in meal_order:
+            if mt not in by_meal:
+                continue
+            emoji = MEAL_EMOJI.get(mt, "🍽")
+            section_lines = [f"{emoji} *{mt.capitalize()}*"]
+            for g in by_meal[mt]:
+                ingredients = g["ingredients"]
+                section_lines.append(_fmt_dish_group(ingredients))
+            meal_sections.append("\n".join(section_lines))
+
+        parts.append("\n" + "\n\n".join(meal_sections))
+        parts.append(f"\n{_fmt_totals(totals, goal)}")
     else:
         parts.append("\n_No food logged yet today._")
 

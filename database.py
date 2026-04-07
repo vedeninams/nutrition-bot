@@ -41,13 +41,22 @@ def init_db():
             -- ─────────────────────────────────────────────
             -- Individual logged items
             -- Each photo / text message → one or more rows
+            --
+            -- dish_name  = the containing dish / plate name
+            --              (e.g. "Udon Noodle Bowl", "König Käse")
+            --              All ingredients of the same dish share
+            --              the same dish_name.  For a standalone
+            --              single item it equals dish.
+            -- dish       = the individual ingredient / component
+            --              (e.g. "Tofu 80g", "Udon noodles 150g")
             -- ─────────────────────────────────────────────
             CREATE TABLE IF NOT EXISTS meals (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id         INTEGER NOT NULL,
                 logged_at       TEXT    NOT NULL DEFAULT (datetime('now')),
                 meal_type       TEXT    NOT NULL,   -- breakfast / lunch / dinner / snack
-                dish            TEXT    NOT NULL,   -- human-readable name ("Greek yogurt 150g")
+                dish_name       TEXT,               -- parent dish / plate name
+                dish            TEXT    NOT NULL,   -- individual ingredient or item
                 kcal            REAL    DEFAULT 0,
                 protein_g       REAL    DEFAULT 0,
                 fat_g           REAL    DEFAULT 0,
@@ -110,6 +119,14 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_daily_stats_user_date
                 ON daily_stats (user_id, date);
         """)
+    # ── Migration: add dish_name to existing databases ───────────────────────
+    # ALTER TABLE is a no-op if the column already exists would raise an
+    # OperationalError, so we check first.
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(meals)").fetchall()]
+    if "dish_name" not in cols:
+        conn.execute("ALTER TABLE meals ADD COLUMN dish_name TEXT")
+        conn.commit()
+
     conn.close()
 
 
@@ -198,27 +215,31 @@ def log_meal(
     confidence: str = "medium",
     source: str = "photo",
     meal_type: Optional[str] = None,
+    dish_name: Optional[str] = None,
     notes: Optional[str] = None,
 ) -> int:
     """
     Insert one meal row and return its id.
+    dish_name = parent dish/plate (e.g. "Udon Noodle Bowl"); defaults to dish.
     meal_type is auto-classified if not provided.
     """
     ensure_user(user_id)
     now = datetime.now()
     if meal_type is None:
         meal_type = classify_meal_type(now.hour, kcal)
+    if dish_name is None:
+        dish_name = dish   # standalone item — dish_name = the item itself
 
     conn = get_conn()
     with conn:
         cur = conn.execute(
             """INSERT INTO meals
-               (user_id, logged_at, meal_type, dish, kcal,
+               (user_id, logged_at, meal_type, dish_name, dish, kcal,
                 protein_g, fat_g, carbs_g, sugar_g,
                 confidence, source, notes)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
-                user_id, now.isoformat(), meal_type, dish, kcal,
+                user_id, now.isoformat(), meal_type, dish_name, dish, kcal,
                 protein_g, fat_g, carbs_g, sugar_g,
                 confidence, source, notes
             )
@@ -231,14 +252,17 @@ def log_meal(
 def log_meal_items(user_id: int, items: list[dict], source: str = "photo") -> list[int]:
     """
     Log multiple items from one meal (e.g. a plate with 3 components).
-    Each item is a dict with keys: dish, kcal, protein_g, fat_g, carbs_g, sugar_g, confidence.
+    Each item is a dict with keys: dish_name, dish, kcal, protein_g, fat_g,
+    carbs_g, sugar_g, confidence, meal_type, notes.
+    dish_name groups all ingredients of the same dish together.
     Returns list of inserted ids.
     """
     ids = []
     for item in items:
         meal_id = log_meal(
             user_id=user_id,
-            dish=item.get("dish", "Unknown"),
+            dish_name=item.get("dish_name"),   # e.g. "Udon Noodle Bowl"
+            dish=item.get("dish", "Unknown"),   # e.g. "Tofu 80g"
             kcal=item.get("kcal", 0),
             protein_g=item.get("protein_g", 0),
             fat_g=item.get("fat_g", 0),
@@ -309,6 +333,44 @@ def delete_meal(meal_id: int) -> bool:
     return cur.rowcount > 0
 
 
+def scale_dish_items(user_id: int, dish_name: str, factor: float) -> int:
+    """
+    Multiply all macro values of every non-deleted item in this dish by factor.
+    E.g. factor=0.5 → user ate half the dish.
+    Returns the number of rows updated.
+    """
+    conn = get_conn()
+    with conn:
+        cur = conn.execute(
+            """UPDATE meals SET
+                   kcal      = ROUND(kcal      * ?, 1),
+                   protein_g = ROUND(protein_g * ?, 1),
+                   fat_g     = ROUND(fat_g     * ?, 1),
+                   carbs_g   = ROUND(carbs_g   * ?, 1),
+                   sugar_g   = ROUND(sugar_g   * ?, 1)
+               WHERE user_id = ? AND dish_name = ? AND confidence != 'deleted'""",
+            (factor, factor, factor, factor, factor, user_id, dish_name)
+        )
+    conn.close()
+    return cur.rowcount
+
+
+def delete_by_dish_name(user_id: int, dish_name: str) -> int:
+    """
+    Soft-delete all non-deleted items for this user that share the given dish_name.
+    Returns the number of rows deleted.
+    """
+    conn = get_conn()
+    with conn:
+        cur = conn.execute(
+            """UPDATE meals SET confidence = 'deleted'
+               WHERE user_id = ? AND dish_name = ? AND confidence != 'deleted'""",
+            (user_id, dish_name)
+        )
+    conn.close()
+    return cur.rowcount
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Queries
 # ─────────────────────────────────────────────────────────────────────────────
@@ -327,6 +389,62 @@ def get_today_meals(user_id: int) -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_today_meals_grouped(user_id: int) -> list[dict]:
+    """
+    Today's meals grouped by dish_name + meal_type.
+    Returns a list of dish groups, each with summed macros and ingredient lines.
+
+    Example:
+      [
+        {
+          "dish_name": "Udon Noodle Bowl",
+          "meal_type": "lunch",
+          "kcal": 620, "protein_g": 28, ...
+          "ingredients": [
+            {"dish": "Udon noodles 150g", "kcal": 220, ...},
+            {"dish": "Tofu 80g", "kcal": 90, ...},
+            ...
+          ]
+        },
+        {
+          "dish_name": "König Käse",
+          "meal_type": "lunch",
+          "kcal": 110, ...
+          "ingredients": [{"dish": "König Käse", "kcal": 110, ...}]
+        }
+      ]
+    """
+    rows = get_today_meals(user_id)  # already ordered by logged_at
+
+    # Group by (dish_name, meal_type) preserving order of first appearance
+    from collections import OrderedDict
+    groups: OrderedDict[tuple, dict] = OrderedDict()
+
+    for row in rows:
+        key = (row.get("dish_name") or row["dish"], row["meal_type"])
+        if key not in groups:
+            groups[key] = {
+                "dish_name": key[0],
+                "meal_type": row["meal_type"],
+                "kcal": 0.0,
+                "protein_g": 0.0,
+                "fat_g": 0.0,
+                "carbs_g": 0.0,
+                "sugar_g": 0.0,
+                "confidence": row.get("confidence", "medium"),
+                "ingredients": [],
+            }
+        g = groups[key]
+        g["kcal"]      += row.get("kcal", 0)
+        g["protein_g"] += row.get("protein_g", 0)
+        g["fat_g"]     += row.get("fat_g", 0)
+        g["carbs_g"]   += row.get("carbs_g", 0)
+        g["sugar_g"]   += row.get("sugar_g", 0)
+        g["ingredients"].append(row)
+
+    return list(groups.values())
 
 
 def get_today_totals(user_id: int) -> dict:

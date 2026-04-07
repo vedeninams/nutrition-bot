@@ -396,16 +396,47 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        meal_id = result.get("meal_id")
-
-        if action == "delete_many":
-            meal_ids = result.get("meal_ids", [])
-            deleted = sum(1 for mid in meal_ids if db.delete_meal(mid))
+        # ── Scale whole dish (e.g. "I only ate half") ────────────────────────
+        if action == "scale_dish":
+            dish_name = result.get("dish_name", "")
+            factor = float(result.get("factor", 1.0))
+            if not dish_name or not (0.05 <= factor <= 0.99):
+                await update.message.reply_text(
+                    "🤔 I couldn't figure out which dish or how much to adjust."
+                )
+                return
+            updated = db.scale_dish_items(user_id, dish_name, factor)
+            pct = int(factor * 100)
             totals = db.get_today_totals(user_id)
             user_data = db.get_user(user_id) or {}
             goal = user_data.get("daily_kcal", 2000)
             await update.message.reply_text(
-                f"🗑 Removed {deleted} item{'s' if deleted != 1 else ''}.\n\n"
+                f"✏️ Adjusted *{dish_name}* to {pct}% ({updated} ingredient{'s' if updated != 1 else ''} scaled).\n\n"
+                + advisor._fmt_totals(totals, goal),
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
+        meal_id = result.get("meal_id")
+
+        if action == "delete_many":
+            meal_ids = result.get("meal_ids", [])
+            dish_name = result.get("dish_name")  # prefer dish_name deletion if given
+            user_data = db.get_user(user_id) or {}
+            goal = user_data.get("daily_kcal", 2000)
+
+            if dish_name:
+                # Delete all items that share this dish_name — most reliable
+                deleted = db.delete_by_dish_name(user_id, dish_name)
+                label = f" *{dish_name}*" if dish_name else ""
+            else:
+                # Fall back to deleting by explicit IDs
+                deleted = sum(1 for mid in meal_ids if db.delete_meal(mid))
+                label = ""
+
+            totals = db.get_today_totals(user_id)
+            await update.message.reply_text(
+                f"🗑 Removed{label} ({deleted} item{'s' if deleted != 1 else ''}).\n\n"
                 + advisor._fmt_totals(totals, goal),
                 parse_mode=ParseMode.MARKDOWN,
             )
