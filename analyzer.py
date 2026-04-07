@@ -251,7 +251,7 @@ CORRECTION_SYSTEM_PROMPT = """You are a nutritionist assistant helping the user 
 The user will describe what needs to change in plain language.
 You have the recent meal history shown below.
 
-TWO types of corrections are possible:
+FOUR types of corrections are possible:
 
 1. Single item correction — changing quantity, name, or calories of one specific item:
    Return: {"action": "update", "meal_id": <id>, "updates": {"dish": ..., "kcal": ..., etc}, "reason": "..."}
@@ -263,6 +263,11 @@ TWO types of corrections are possible:
 
 3. Delete a single item:
    Return: {"action": "delete", "meal_id": <id>, "updates": {}, "reason": "..."}
+
+4. Delete multiple items — user wants to remove a group of recently logged entries:
+   Return: {"action": "delete_many", "meal_ids": [<id1>, <id2>, ...], "updates": {}, "reason": "..."}
+   Use this when the user says things like "remove those 6 entries", "delete all of that", "remove the dish I just added",
+   "delete everything I just logged", "remove all those items". Group items logged close together in time.
 
 If you cannot match to any meal:
    Return: {"action": "none", "meal_id": null, "updates": {}, "reason": "Could not identify meal"}

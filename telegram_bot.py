@@ -394,10 +394,29 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         meal_id = result.get("meal_id")
 
+        if action == "delete_many":
+            meal_ids = result.get("meal_ids", [])
+            deleted = sum(1 for mid in meal_ids if db.delete_meal(mid))
+            totals = db.get_today_totals(user_id)
+            user_data = db.get_user(user_id) or {}
+            goal = user_data.get("daily_kcal", 2000)
+            await update.message.reply_text(
+                f"🗑 Removed {deleted} item{'s' if deleted != 1 else ''}.\n\n"
+                + advisor._fmt_totals(totals, goal),
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
         if action == "delete":
             ok = db.delete_meal(meal_id)
             if ok:
-                await update.message.reply_text("🗑 Removed that entry. Today's total is updated.")
+                totals = db.get_today_totals(user_id)
+                user_data = db.get_user(user_id) or {}
+                goal = user_data.get("daily_kcal", 2000)
+                await update.message.reply_text(
+                    "🗑 Removed.\n\n" + advisor._fmt_totals(totals, goal),
+                    parse_mode=ParseMode.MARKDOWN,
+                )
             else:
                 await update.message.reply_text("Couldn't find that entry to remove.")
             return
