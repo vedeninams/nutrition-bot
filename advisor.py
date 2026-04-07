@@ -191,14 +191,28 @@ def log_confirmation(items: list[dict], user_id: int) -> str:
     dish_blocks = "\n".join(_fmt_dish_group(g) for g in groups.values())
 
     if len(groups) == 1 and len(items) == 1:
-        item_lines = f"✅ Logged:\n{dish_blocks}"
-    elif len(groups) == 1:
-        dish_name = list(groups.keys())[0]
+        # Single standalone item — just show it once
+        i = items[0]
+        emoji = _food_emoji(i.get("dish_name") or i.get("dish", ""))
         item_lines = (
-            f"✅ Logged *{dish_name}* ({len(items)} ingredients, "
-            f"{total_kcal:.0f} kcal / {total_protein:.0f}g protein):\n{dish_blocks}"
+            f"✅ Logged: {emoji} *{i.get('dish_name') or i.get('dish', '?')}*\n"
+            f"   {i.get('kcal', 0):.0f} kcal — {i.get('protein_g', 0):.0f}g protein"
+        )
+    elif len(groups) == 1:
+        # One dish, multiple ingredients — show dish name once as header, then ingredients only
+        dish_name = list(groups.keys())[0]
+        g = list(groups.values())[0]
+        emoji = _food_emoji(dish_name)
+        ingredient_lines = "\n".join(
+            f"  · {i.get('dish', '?')} — {i.get('kcal', 0):.0f} kcal — {i.get('protein_g', 0):.0f}g protein"
+            for i in g
+        )
+        item_lines = (
+            f"✅ Logged {emoji} *{dish_name}* ({len(items)} ingredients, "
+            f"{total_kcal:.0f} kcal / {total_protein:.0f}g protein):\n{ingredient_lines}"
         )
     else:
+        # Multiple dishes
         item_lines = (
             f"✅ Logged {len(groups)} dish(es), {len(items)} item(s) total "
             f"({total_kcal:.0f} kcal / {total_protein:.0f}g protein):\n{dish_blocks}"

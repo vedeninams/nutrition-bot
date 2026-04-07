@@ -180,16 +180,23 @@ def set_language(user_id: int, lang: str):
 # Meal classification
 # ─────────────────────────────────────────────────────────────────────────────
 
-def classify_meal_type(hour: int, kcal: float) -> str:
+def classify_meal_type(hour: int, kcal: float, total_dish_kcal: float = None) -> str:
     """
-    Guess breakfast/lunch/dinner/snack from the time of day.
-    Rules (can be overridden by the user later):
-      05–10  → breakfast
-      11–14  → lunch
-      17–21  → dinner
-      everything else, or low-cal → snack
+    Guess breakfast/lunch/dinner/snack from the time of day and dish size.
+
+    Rules:
+      - If the TOTAL dish kcal < 150, it's a snack regardless of time
+        (individual ingredients can be tiny, so we use total_dish_kcal when available)
+      - 05–10 → breakfast
+      - 11–15 → lunch
+      - 17–22 → dinner
+      - Otherwise → snack
+
+    total_dish_kcal: pass the sum of ALL ingredients in the dish so a
+    plate of 8 low-kcal vegetables isn't wrongly called a snack.
     """
-    if kcal < 80:
+    ref_kcal = total_dish_kcal if total_dish_kcal is not None else kcal
+    if ref_kcal < 150:
         return "snack"
     if 5 <= hour < 11:
         return "breakfast"
@@ -216,17 +223,20 @@ def log_meal(
     source: str = "photo",
     meal_type: Optional[str] = None,
     dish_name: Optional[str] = None,
+    total_dish_kcal: Optional[float] = None,
     notes: Optional[str] = None,
 ) -> int:
     """
     Insert one meal row and return its id.
     dish_name = parent dish/plate (e.g. "Udon Noodle Bowl"); defaults to dish.
+    total_dish_kcal = sum of all ingredients in the dish (used for meal classification
+                      so a 30-kcal broccoli in a 600-kcal dinner isn't called a snack).
     meal_type is auto-classified if not provided.
     """
     ensure_user(user_id)
     now = datetime.now()
     if meal_type is None:
-        meal_type = classify_meal_type(now.hour, kcal)
+        meal_type = classify_meal_type(now.hour, kcal, total_dish_kcal)
     if dish_name is None:
         dish_name = dish   # standalone item — dish_name = the item itself
 
@@ -251,18 +261,26 @@ def log_meal(
 
 def log_meal_items(user_id: int, items: list[dict], source: str = "photo") -> list[int]:
     """
-    Log multiple items from one meal (e.g. a plate with 3 components).
+    Log multiple items from one meal (e.g. a plate with 8 components).
     Each item is a dict with keys: dish_name, dish, kcal, protein_g, fat_g,
     carbs_g, sugar_g, confidence, meal_type, notes.
-    dish_name groups all ingredients of the same dish together.
-    Returns list of inserted ids.
+
+    meal_type classification uses the TOTAL dish kcal so that individual
+    low-kcal ingredients (e.g. broccoli 30 kcal) are not wrongly labelled
+    as "snack" when they belong to a 600 kcal dinner plate.
     """
+    # Total kcal across all items in this batch — used for meal classification
+    total_dish_kcal = sum(item.get("kcal", 0) for item in items)
+
     ids = []
     for item in items:
+        # If Claude already detected a meal_type from caption, use it.
+        # Otherwise classify using the full dish total, not just this ingredient.
+        meal_type = item.get("meal_type") or None  # None → auto-classify in log_meal
         meal_id = log_meal(
             user_id=user_id,
-            dish_name=item.get("dish_name"),   # e.g. "Udon Noodle Bowl"
-            dish=item.get("dish", "Unknown"),   # e.g. "Tofu 80g"
+            dish_name=item.get("dish_name"),
+            dish=item.get("dish", "Unknown"),
             kcal=item.get("kcal", 0),
             protein_g=item.get("protein_g", 0),
             fat_g=item.get("fat_g", 0),
@@ -270,7 +288,8 @@ def log_meal_items(user_id: int, items: list[dict], source: str = "photo") -> li
             sugar_g=item.get("sugar_g", 0),
             confidence=item.get("confidence", "medium"),
             source=source,
-            meal_type=item.get("meal_type"),
+            meal_type=meal_type,
+            total_dish_kcal=total_dish_kcal,  # passed through for classification
             notes=item.get("notes"),
         )
         ids.append(meal_id)
@@ -350,6 +369,20 @@ def scale_dish_items(user_id: int, dish_name: str, factor: float) -> int:
                    sugar_g   = ROUND(sugar_g   * ?, 1)
                WHERE user_id = ? AND dish_name = ? AND confidence != 'deleted'""",
             (factor, factor, factor, factor, factor, user_id, dish_name)
+        )
+    conn.close()
+    return cur.rowcount
+
+
+def clear_today(user_id: int) -> int:
+    """Soft-delete all of today's meals for this user. Returns count removed."""
+    today = date.today().isoformat()
+    conn = get_conn()
+    with conn:
+        cur = conn.execute(
+            """UPDATE meals SET confidence = 'deleted'
+               WHERE user_id = ? AND date(logged_at) = ? AND confidence != 'deleted'""",
+            (user_id, today)
         )
     conn.close()
     return cur.rowcount

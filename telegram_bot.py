@@ -132,6 +132,17 @@ async def cmd_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # /goal  — set or view daily calorie target
 # ─────────────────────────────────────────────────────────────────────────────
 
+async def cmd_clear_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    removed = db.clear_today(user_id)
+    if removed:
+        await update.message.reply_text(
+            f"🗑 Cleared {removed} item{'s' if removed != 1 else ''} logged today. Fresh start!",
+        )
+    else:
+        await update.message.reply_text("Nothing logged today to clear.")
+
+
 async def cmd_goal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     db.ensure_user(user_id)
@@ -583,6 +594,7 @@ def main():
     app.add_handler(CommandHandler("week", cmd_week))
     app.add_handler(CommandHandler("goal", cmd_goal))
     app.add_handler(CommandHandler("profile", cmd_profile))
+    app.add_handler(CommandHandler("clear_today", cmd_clear_today))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
