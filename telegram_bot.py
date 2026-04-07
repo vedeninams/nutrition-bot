@@ -46,6 +46,11 @@ BOT_TOKEN = os.getenv("NUTRITION_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
 if not BOT_TOKEN:
     sys.exit("❌ No TELEGRAM_BOT_TOKEN set in .env")
 
+# When a user sends multiple photos as an album, Telegram attaches the caption
+# only to the first photo.  We cache it here so subsequent photos in the same
+# album inherit the same caption (and therefore the same meal_type hint).
+_album_caption_cache: dict[str, str] = {}   # media_group_id → caption text
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -179,7 +184,20 @@ async def cmd_goal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    caption = update.message.caption or ""
+
+    # ── Album caption sharing ─────────────────────────────────────────────────
+    # When photos are sent as an album, only the first message carries the
+    # caption. For subsequent photos we look up the cached caption so the
+    # meal_type hint ("for lunch") is applied to every photo in the batch.
+    raw_caption = update.message.caption or ""
+    group_id = update.message.media_group_id  # None for single photos
+
+    if group_id:
+        if raw_caption:
+            _album_caption_cache[group_id] = raw_caption   # store from first photo
+        caption = _album_caption_cache.get(group_id, "")   # inherit for later photos
+    else:
+        caption = raw_caption
 
     await _typing(update)
 

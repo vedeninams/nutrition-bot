@@ -182,18 +182,20 @@ def set_language(user_id: int, lang: str):
 
 def classify_meal_type(hour: int, kcal: float, total_dish_kcal: float = None) -> str:
     """
-    Guess breakfast/lunch/dinner/snack from the time of day and dish size.
+    Fallback meal classification by time of day and dish size.
+    Only used when the user's caption does NOT mention a meal type.
+    Caption always takes priority — this is the last resort.
 
     Rules:
-      - If the TOTAL dish kcal < 150, it's a snack regardless of time
-        (individual ingredients can be tiny, so we use total_dish_kcal when available)
-      - 05–10 → breakfast
-      - 11–15 → lunch
-      - 17–22 → dinner
-      - Otherwise → snack
+      05:00–10:59  → breakfast
+      11:00–14:59  → lunch
+      15:00–16:59  → snack  (afternoon)
+      17:00–22:59  → dinner
+      23:00–04:59  → snack  (late night)
+      Any time, total dish < 150 kcal → snack
 
-    total_dish_kcal: pass the sum of ALL ingredients in the dish so a
-    plate of 8 low-kcal vegetables isn't wrongly called a snack.
+    total_dish_kcal: use the full plate total so a 30-kcal broccoli
+    in a 600-kcal dinner plate isn't labelled a snack.
     """
     ref_kcal = total_dish_kcal if total_dish_kcal is not None else kcal
     if ref_kcal < 150:
@@ -202,9 +204,11 @@ def classify_meal_type(hour: int, kcal: float, total_dish_kcal: float = None) ->
         return "breakfast"
     if 11 <= hour < 15:
         return "lunch"
-    if 17 <= hour < 22:
+    if 15 <= hour < 17:
+        return "snack"
+    if 17 <= hour < 23:
         return "dinner"
-    return "snack"
+    return "snack"  # 23:00–04:59 late night
 
 
 # ─────────────────────────────────────────────────────────────────────────────
