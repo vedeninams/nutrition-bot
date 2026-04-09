@@ -330,7 +330,17 @@ The following action types are available:
    Always return the dish_name exactly as it appears in the meal history.
    factor must be a decimal between 0.1 and 0.9.
 
-6. Remove duplicate logs of the same dish — keep the first occurrence, delete later ones:
+6. Scale a dish to a specific total gram weight — user says how many grams they actually ate:
+   Return: {{"action": "scale_dish_grams", "dish_name": "<exact dish name>", "target_grams": <number>, "updates": {{}}, "reason": "..."}}
+   Use when the user specifies a total gram amount for a dish they already logged:
+   - "I ate 600g of that bowl" → target_grams: 600
+   - "I only had 300g of the salad" → target_grams: 300
+   - "the portion was 400 grams" → target_grams: 400
+   - User posts a photo and says "I ate 600 grams" → target_grams: 600, dish_name from last batch
+   The system will compute the scale factor automatically from (target_grams / current_logged_grams).
+   Always use the dish_name exactly as it appears in history.
+
+7. Remove duplicate logs of the same dish — keep the first occurrence, delete later ones:
    Return: {{"action": "delete_duplicates", "dish_name": "<exact dish name>", "updates": {{}}, "reason": "..."}}
    Use when the user says things like "remove duplicate salad bowl entries", "delete the duplicate X",
    "remove extra X logs", "I logged X twice", "remove duplicate entries".

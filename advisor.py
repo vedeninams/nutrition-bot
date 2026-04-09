@@ -120,7 +120,9 @@ def _food_emoji(dish: str) -> str:
 def _fmt_meal(m: dict) -> str:
     emoji = _food_emoji(m.get("dish", ""))
     protein = m.get("protein_g", 0)
-    return f"{emoji} {m['dish']} - {m['kcal']:.0f} kcal - {protein:.0f}g protein"
+    grams = _parse_grams(m.get("dish", ""))
+    grams_str = f" - {grams:.0f}g" if grams > 0 else ""
+    return f"{emoji} {m['dish']}{grams_str} - {m['kcal']:.0f} kcal - {protein:.0f}g protein"
 
 def _fmt_totals(totals: dict, goal: int) -> str:
     kcal = totals.get("kcal", 0)
@@ -144,26 +146,37 @@ def _fmt_totals(totals: dict, goal: int) -> str:
 # 1. Post-log confirmation message
 # ─────────────────────────────────────────────────────────────────────────────
 
+import re as _re
+
+def _parse_grams(dish: str) -> float:
+    """Extract weight in grams (or ml) from a dish string like 'Chicken breast 120g'."""
+    m = _re.search(r'(\d+(?:\.\d+)?)\s*(?:g|ml)\b', dish, _re.IGNORECASE)
+    return float(m.group(1)) if m else 0.0
+
+
 def _fmt_dish_group(items: list[dict]) -> str:
     """
     Format a group of items that belong to the same dish.
     Single-item dishes → one line.
     Multi-ingredient dishes → dish name header + indented ingredient list.
+    Shows total grams when parseable from ingredient names.
     """
     dish_name = items[0].get("dish_name") or items[0].get("dish", "?")
     total_kcal = sum(i.get("kcal", 0) for i in items)
     total_protein = sum(i.get("protein_g", 0) for i in items)
+    total_grams = sum(_parse_grams(i.get("dish", "")) for i in items)
+    grams_str = f" - {total_grams:.0f}g" if total_grams > 0 else ""
 
     if len(items) == 1:
         emoji = _food_emoji(dish_name)
         return (
-            f"{emoji} *{dish_name}* -{total_kcal:.0f} kcal -{total_protein:.0f}g protein"
+            f"{emoji} *{dish_name}*{grams_str} - {total_kcal:.0f} kcal - {total_protein:.0f}g protein"
         )
     else:
         emoji = _food_emoji(dish_name)
-        header = f"{emoji} *{dish_name}* -{total_kcal:.0f} kcal -{total_protein:.0f}g protein"
+        header = f"{emoji} *{dish_name}*{grams_str} - {total_kcal:.0f} kcal - {total_protein:.0f}g protein"
         ingredient_lines = "\n".join(
-            f"  · {i.get('dish', '?')} -{i.get('kcal', 0):.0f} kcal -{i.get('protein_g', 0):.0f}g protein"
+            f"  · {i.get('dish', '?')} - {i.get('kcal', 0):.0f} kcal - {i.get('protein_g', 0):.0f}g protein"
             for i in items
         )
         return f"{header}\n{ingredient_lines}"

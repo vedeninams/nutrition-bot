@@ -444,7 +444,21 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     else:
                         reply_lines.append(f"No duplicates found for *{dish_name}*")
 
-            # ── Scale whole dish ──────────────────────────────────────────────
+            # ── Scale dish to specific gram weight ────────────────────────────
+            elif action == "scale_dish_grams":
+                dish_name = result.get("dish_name", "")
+                target_grams = float(result.get("target_grams", 0))
+                if dish_name and target_grams > 0:
+                    items = db.get_dish_items_today(user_id, dish_name)
+                    current_grams = sum(advisor._parse_grams(i.get("dish", "")) for i in items)
+                    if current_grams > 0:
+                        factor = target_grams / current_grams
+                        db.scale_dish_items(user_id, dish_name, factor)
+                        reply_lines.append(f"✏️ *{dish_name}* adjusted to {target_grams:.0f}g ({int(factor*100)}% of logged)")
+                    else:
+                        reply_lines.append(f"⚠️ Couldn't calculate current grams for *{dish_name}* — try 'I ate X% of that' instead")
+
+            # ── Scale whole dish by fraction ──────────────────────────────────
             elif action == "scale_dish":
                 dish_name = result.get("dish_name", "")
                 factor = float(result.get("factor", 1.0))

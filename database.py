@@ -812,6 +812,25 @@ def get_profile_for_prompt(user_id: int) -> str:
     return f"What I know about this user:\n{profile}"
 
 
+def get_dish_items_today(user_id: int, dish_name: str) -> list[dict]:
+    """
+    Return all non-deleted items today that belong to the given dish_name.
+    Case-insensitive match. Used to compute current total grams for a dish
+    before scaling by target weight.
+    """
+    today = date.today().isoformat()
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT * FROM meals
+           WHERE user_id = ? AND LOWER(dish_name) = LOWER(?)
+             AND date(logged_at) = ? AND confidence != 'deleted'
+           ORDER BY logged_at""",
+        (user_id, dish_name, today)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def get_last_meal_batch(user_id: int, window_seconds: int = 120) -> list[dict]:
     """
     Return all non-deleted meal items that were logged in the same
