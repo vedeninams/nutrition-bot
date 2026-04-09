@@ -297,10 +297,19 @@ The following action types are available:
 
 4. Delete a whole dish (all its ingredients) — user wants to remove a dish by name or a recent batch:
    Return: {{"action": "delete_many", "meal_ids": [<id1>, <id2>, ...], "dish_name": "<dish name>", "updates": {{}}, "reason": "..."}}
-   Use when:
-   - User names a dish: "remove the udon noodles", "delete the salad" → find all ids with that dish_name
-   - User says "remove this dish", "delete what I just added", "that was wrong", "remove all of that"
-     → use ALL ids from the LAST LOGGED BATCH if present, or the most recent dish_name group
+   CRITICAL RULES for delete_many:
+   - meal_ids MUST always be populated — include ALL meal ids that belong to this dish.
+     Even if you match by dish_name, always resolve and list every individual id.
+     The ids are the primary deletion mechanism; dish_name is just the display label.
+   - dish_name should be the EXACT name from the meal history (copy it verbatim).
+     If the user used an approximate/misspelled name (e.g. "Syrniky" instead of
+     "Syrniki with Cherries 200g"), still use the EXACT name from history for dish_name,
+     but resolve the correct meal_ids by semantic matching.
+   - Use when:
+     · User names a dish approximately: "remove the Syrniky", "delete the salad", "the udon bowl"
+       → semantically match to the closest dish in history, return its ids
+     · User says "remove this dish", "delete what I just added", "that was wrong", "remove all of that"
+       → use ALL ids from the LAST LOGGED BATCH if present, or the most recent dish_name group
 
 5. Scale a whole dish by a fraction — user ate only part of it:
    Return: {{"action": "scale_dish", "dish_name": "<dish name>", "factor": <number 0.1–0.9>, "updates": {{}}, "reason": "..."}}
