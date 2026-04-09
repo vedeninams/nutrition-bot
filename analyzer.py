@@ -32,12 +32,19 @@ use that to adjust your estimates.
 
 IMPORTANT: You must reply with ONLY a JSON array. No prose, no explanation.
 Each element must have exactly these keys:
-  dish_name   — string, the NAME OF THE WHOLE DISH OR PLATE (e.g. "Udon Noodle Bowl",
-                "Caesar Salad", "Overnight Oats"). ALL components of the same plate
-                share the EXACT SAME dish_name. For a single standalone item (e.g. an
-                apple, a coffee) dish_name = dish.
-  dish        — string, the individual ingredient or component
-                (e.g. "Udon noodles 150g", "Soft-boiled egg", "Broth 200ml")
+  dish_name   — string, the NAME OF THE WHOLE DISH OR PLATE (e.g. "Udon Bowl",
+                "Caesar Salad", "Oats"). ALL components of the same plate share the
+                EXACT SAME dish_name. For a single standalone item dish_name = dish.
+                Keep dish_name SHORT — drop filler words ("with", "and", "of").
+  dish        — string, the individual ingredient or component. Keep it SHORT:
+                drop redundant words, use the minimal recognisable name + weight.
+                Examples: "Feta cheese 50g" → "Feta 50g"
+                          "Sesame seeds & nigella seeds 5g" → "Sesame & nigella 5g"
+                          "Bulgur/couscous salad (kisir) 100g" → "Bulgur & couscous 100g"
+                          "Mixed greens (spinach/arugula) 50g" → "Mixed greens 50g"
+                          "Dressing (small pot, est. 30ml)" → "Dressing 30ml"
+                          "Hard-boiled egg 1 whole" → "Boiled egg"
+                          "Diced chicken breast 120g" → "Chicken breast 120g"
   kcal        — number (integer or float)
   protein_g   — number
   fat_g       — number
@@ -64,8 +71,8 @@ If no portion is specified, assume one standard serving as shown on the label.
 
 IMPORTANT: You must reply with ONLY a JSON array with ONE element.
 Keys: dish_name, dish, kcal, protein_g, fat_g, carbs_g, sugar_g, confidence, meal_type
-dish_name — the product name from the label (e.g. "König Käse", "Alpro Soy Yogurt")
-dish      — same as dish_name for a packaged product (it's a single item)
+dish_name — the product name from the label, short and clean (e.g. "König Käse", "Alpro Soy Yogurt")
+dish      — same as dish_name for a packaged product. Keep it short — drop redundant words.
 meal_type — detect from the caption: "breakfast", "lunch", "dinner", "snack", or null if not mentioned.
 confidence should be "high" if you could read the label clearly, "medium" otherwise.
 
@@ -77,10 +84,12 @@ Estimate the nutritional values based on the description.
 If quantities are vague ("a bowl", "some"), make a realistic estimate for an average portion.
 
 IMPORTANT: Reply with ONLY a JSON array. Each element must have these keys:
-  dish_name   — the name of the whole dish/meal (e.g. "Oatmeal Bowl", "Caesar Salad").
+  dish_name   — the name of the whole dish/meal, kept SHORT (e.g. "Oats", "Salad", "Udon Bowl").
                 All ingredients of the same dish share the SAME dish_name.
                 For a single standalone item, dish_name = dish.
-  dish        — the individual ingredient or item (e.g. "Rolled oats 80g", "Banana slices")
+  dish        — the individual ingredient, SHORT + weight. Drop redundant words:
+                "Rolled oats 80g" → "Oats 80g", "Banana slices 1 medium" → "Banana",
+                "Hard-boiled egg 1 whole" → "Boiled egg", "Feta cheese 50g" → "Feta 50g"
   kcal, protein_g, fat_g, carbs_g, sugar_g, confidence, meal_type
 
 For meal_type detect it from the user's words:

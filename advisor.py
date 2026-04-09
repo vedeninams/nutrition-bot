@@ -1,8 +1,8 @@
 """
-advisor.py — Proactive nutrition intelligence.
+advisor.py -Proactive nutrition intelligence.
 
 Handles:
-  1. Real-time limit alerts (after every log — >80% daily kcal)
+  1. Real-time limit alerts (after every log ->80% daily kcal)
   2. Daily morning summary (called by cron at 08:00)
   3. Weekly Sunday review (called by cron on Sundays)
   4. Answer questions about nutrition history
@@ -33,7 +33,7 @@ MEAL_EMOJI = {
 }
 
 # Keyword → emoji mapping for common foods.
-# Checked in order — first match wins.
+# Checked in order -first match wins.
 FOOD_EMOJI_MAP = [
     # Eggs & dairy
     (["egg", "яйц", "ei"],                              "🥚"),
@@ -120,7 +120,7 @@ def _food_emoji(dish: str) -> str:
 def _fmt_meal(m: dict) -> str:
     emoji = _food_emoji(m.get("dish", ""))
     protein = m.get("protein_g", 0)
-    return f"{emoji} {m['dish']} — {m['kcal']:.0f} kcal  —{protein:.0f}g protein"
+    return f"{emoji} {m['dish']} - {m['kcal']:.0f} kcal - {protein:.0f}g protein"
 
 def _fmt_totals(totals: dict, goal: int) -> str:
     kcal = totals.get("kcal", 0)
@@ -157,13 +157,13 @@ def _fmt_dish_group(items: list[dict]) -> str:
     if len(items) == 1:
         emoji = _food_emoji(dish_name)
         return (
-            f"{emoji} *{dish_name}* — {total_kcal:.0f} kcal — {total_protein:.0f}g protein"
+            f"{emoji} *{dish_name}* -{total_kcal:.0f} kcal -{total_protein:.0f}g protein"
         )
     else:
         emoji = _food_emoji(dish_name)
-        header = f"{emoji} *{dish_name}* — {total_kcal:.0f} kcal — {total_protein:.0f}g protein"
+        header = f"{emoji} *{dish_name}* -{total_kcal:.0f} kcal -{total_protein:.0f}g protein"
         ingredient_lines = "\n".join(
-            f"  · {i.get('dish', '?')} — {i.get('kcal', 0):.0f} kcal — {i.get('protein_g', 0):.0f}g protein"
+            f"  · {i.get('dish', '?')} -{i.get('kcal', 0):.0f} kcal -{i.get('protein_g', 0):.0f}g protein"
             for i in items
         )
         return f"{header}\n{ingredient_lines}"
@@ -191,20 +191,20 @@ def log_confirmation(items: list[dict], user_id: int) -> str:
     dish_blocks = "\n".join(_fmt_dish_group(g) for g in groups.values())
 
     if len(groups) == 1 and len(items) == 1:
-        # Single standalone item — just show it once
+        # Single standalone item -just show it once
         i = items[0]
         emoji = _food_emoji(i.get("dish_name") or i.get("dish", ""))
         item_lines = (
             f"✅ Logged: {emoji} *{i.get('dish_name') or i.get('dish', '?')}*\n"
-            f"   {i.get('kcal', 0):.0f} kcal — {i.get('protein_g', 0):.0f}g protein"
+            f"   {i.get('kcal', 0):.0f} kcal -{i.get('protein_g', 0):.0f}g protein"
         )
     elif len(groups) == 1:
-        # One dish, multiple ingredients — show dish name once as header, then ingredients only
+        # One dish, multiple ingredients -show dish name once as header, then ingredients only
         dish_name = list(groups.keys())[0]
         g = list(groups.values())[0]
         emoji = _food_emoji(dish_name)
         ingredient_lines = "\n".join(
-            f"  · {i.get('dish', '?')} — {i.get('kcal', 0):.0f} kcal — {i.get('protein_g', 0):.0f}g protein"
+            f"  · {i.get('dish', '?')} -{i.get('kcal', 0):.0f} kcal -{i.get('protein_g', 0):.0f}g protein"
             for i in g
         )
         item_lines = (
@@ -227,13 +227,13 @@ def log_confirmation(items: list[dict], user_id: int) -> str:
         alert = "\n\n⚠️ You've hit your daily calorie goal!"
     elif pct >= 80:
         remaining = goal - totals.get("kcal", 0)
-        alert = f"\n\n⚡ Heads up — you're at {pct:.0f}% of your goal. ~{remaining:.0f} kcal remaining."
+        alert = f"\n\n⚡ Heads up -you're at {pct:.0f}% of your goal. ~{remaining:.0f} kcal remaining."
 
     # Low confidence note
     low_conf = [i for i in items if i.get("confidence") == "low"]
     conf_note = ""
     if low_conf:
-        conf_note = "\n\n🔍 *Low confidence* on some items — the estimate may be off. Feel free to correct me."
+        conf_note = "\n\n🔍 *Low confidence* on some items -the estimate may be off. Feel free to correct me."
 
     return item_lines + summary + alert + conf_note
 
@@ -274,9 +274,9 @@ def daily_morning_summary(user_id: int) -> str:
     pct = int(ycal / goal * 100) if goal else 0
 
     if pct < 80:
-        verdict = f"Under goal — you had {ycal:.0f} kcal ({pct}% of your {goal} goal). Were you not hungry, or did you forget to log something?"
+        verdict = f"Under goal -you had {ycal:.0f} kcal ({pct}% of your {goal} goal). Were you not hungry, or did you forget to log something?"
     elif pct <= 110:
-        verdict = f"Right on track — {ycal:.0f} kcal ({pct}% of your {goal} goal). 🎯"
+        verdict = f"Right on track -{ycal:.0f} kcal ({pct}% of your {goal} goal). 🎯"
     else:
         over = ycal - goal
         verdict = f"Over goal by {over:.0f} kcal ({pct}%). Maybe a lighter start today? 💪"
@@ -390,7 +390,7 @@ Use Telegram formatting: *bold* for emphasis, no markdown tables."""
 
 def answer_question(user_id: int, question: str) -> str:
     """
-    Answer any nutrition question — data queries AND general advice.
+    Answer any nutrition question -data queries AND general advice.
     Acts as a knowledgeable personal nutritionist, not just a data lookup.
     """
     user = db.get_user(user_id) or {}
@@ -409,17 +409,17 @@ This week's daily totals: {json.dumps(week, default=str)}
 Your role:
 - Answer data questions using the actual numbers above ("you had 30g protein today")
 - Answer general nutrition questions with real expert advice (calorie needs, macros, weight loss, meal suggestions, etc.)
-- If asked about calorie goals or weight loss, calculate properly using standard formulas (TDEE, BMR) based on any info the user gives — weight, height, activity, goals
-- ALWAYS respect the user's preferences — never suggest foods they dislike or can't eat
+- If asked about calorie goals or weight loss, calculate properly using standard formulas (TDEE, BMR) based on any info the user gives -weight, height, activity, goals
+- ALWAYS respect the user's preferences -never suggest foods they dislike or can't eat
 - Be direct and specific. Give actual numbers, not vague advice.
 - Keep answers concise (2-4 sentences) unless the question needs more detail.
 - Be warm and supportive, like a coach who wants them to succeed.
 - Reply in the same language the user writes in.
 
-FORMATTING RULES — this message will be displayed in Telegram:
+FORMATTING RULES -this message will be displayed in Telegram:
 - Use *text* for bold (single asterisk, NOT double)
 - Use _text_ for italic (single underscore)
-- NEVER use markdown tables (| col | col |) — Telegram does not render them
+- NEVER use markdown tables (| col | col |) -Telegram does not render them
 - Instead of tables, format options as a simple list like:
     🏃 Sedentary: 1,500 kcal
     🚶 Lightly active: 1,775 kcal
@@ -429,7 +429,7 @@ FORMATTING RULES — this message will be displayed in Telegram:
 - Keep formatting clean and readable on a phone screen
 """
 
-    # Sonnet for advice — needs reasoning ability, not just data lookup
+    # Sonnet for advice -needs reasoning ability, not just data lookup
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=500,
@@ -481,8 +481,8 @@ def _fmt_activity(stats: dict) -> str:
         dur = w.get("duration_min")
         kcal = w.get("kcal_est") or w.get("kcal_estimated")
         emoji = _workout_emoji(name)
-        dur_str = f" — {dur} min" if dur else ""
-        kcal_str = f" — ~{kcal:.0f} kcal" if kcal else ""
+        dur_str = f" -{dur} min" if dur else ""
+        kcal_str = f" -~{kcal:.0f} kcal" if kcal else ""
         lines.append(f"{emoji} {name}{dur_str}{kcal_str}")
 
     burned = stats.get("kcal_burned_est")
@@ -493,7 +493,7 @@ def _fmt_activity(stats: dict) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. Day summary — works for any date (today, yesterday, etc.)
+# 5. Day summary -works for any date (today, yesterday, etc.)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def day_summary(user_id: int, for_date: str, label: str) -> str:
@@ -543,7 +543,7 @@ def day_summary(user_id: int, for_date: str, label: str) -> str:
             net = eaten - burned
             parts.append(f"\n\n🏃 *Activity:*\n{activity_block}")
             if burned and eaten:
-                parts.append(f"\n📊 *Net intake: ~{net:.0f} kcal* (ate {eaten:.0f} — burned {burned:.0f})")
+                parts.append(f"\n📊 *Net intake: ~{net:.0f} kcal* (ate {eaten:.0f} -burned {burned:.0f})")
 
     return "\n".join(parts)
 
