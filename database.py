@@ -302,25 +302,23 @@ def log_meal_items(user_id: int, items: list[dict], source: str = "photo") -> li
         )
         ids.append(meal_id)
 
-    # If Claude used "Plate" in dish_name (no caption meal_type), replace it with
-    # the actual classified meal_type now that we know it.
-    # e.g. "Small Plate" → "Small Breakfast", "Medium Plate" → "Medium Lunch"
+    # If Claude used "Plate" as placeholder (no caption meal_type) and the item
+    # was classified as breakfast, replace "Plate" with "Breakfast".
+    # Only applies to breakfast — lunch/dinner/snack use descriptive names already.
     if ids:
         conn = get_conn()
-        # Look up what meal_type was actually assigned to the first logged item
         first_row = conn.execute(
             "SELECT meal_type FROM meals WHERE id = ?", (ids[0],)
         ).fetchone()
-        if first_row:
-            actual_meal_type = first_row["meal_type"].capitalize()  # e.g. "Breakfast"
+        if first_row and first_row["meal_type"] == "breakfast":
             with conn:
                 conn.execute(
-                    """UPDATE meals SET dish_name = REPLACE(dish_name, 'Plate', ?)
+                    """UPDATE meals SET dish_name = REPLACE(dish_name, 'Plate', 'Breakfast')
                        WHERE id IN ({})
                          AND dish_name LIKE '%Plate%'""".format(
                         ",".join("?" * len(ids))
                     ),
-                    (actual_meal_type, *ids)
+                    (*ids,)
                 )
         conn.close()
 
