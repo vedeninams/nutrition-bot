@@ -372,7 +372,7 @@ def weekly_review(user_id: int) -> str:
     )
 
     profile = db.get_profile_for_prompt(user_id)
-    prompt = f"""You are a supportive personal nutritionist sending a Sunday monthly overview message.
+    prompt = f"""You are a supportive personal nutritionist sending a detailed Sunday weekly review to your client.
 
 User's daily calorie goal: {goal} kcal
 {f"User profile: {profile}" if profile else ""}
@@ -380,19 +380,25 @@ User's daily calorie goal: {goal} kcal
 Data for the past {len(month_data)} days (all available history):
 {month_summary}
 
-Write exactly 3 short paragraphs separated by blank lines:
+Write a thorough review in exactly 5 paragraphs, each separated by a blank line. This is a once-a-week message so it should be detailed and comprehensive enough to be truly useful:
 
-Paragraph 1: This week's verdict — how did they do vs goal, protein, consistency. Be specific with numbers.
-Paragraph 2: A pattern you notice over the full history (longer trends, recurring habits, what's improving or stuck).
-Paragraph 3: One focused diet recommendation for the coming week based on everything you see. Make it concrete and actionable.
+Paragraph 1 - This week verdict: How did this week go overall? Discuss calorie consistency, protein intake, and how many days were on-track vs off-track. Be specific with numbers and give a clear verdict.
 
-Keep each paragraph to 1-2 sentences. Warm, coach-like tone. No bullet points. No headers.
-Use Telegram formatting: *bold* for key numbers/words only.
+Paragraph 2 - Wins & highlights: What went well this week or over the full period? Celebrate specific positive patterns, improvements, or good habits you notice in the data. Be genuine and specific.
+
+Paragraph 3 - Patterns & trends over the full history: Look at the longer arc of all available data. What recurring habits do you see? Are things improving, plateauing, or sliding? Mention specific days or weeks where things shifted.
+
+Paragraph 4 - Areas to improve: Where are the weak spots? What patterns are holding them back? Be honest but kind - name the specific issue and why it matters for their goal.
+
+Paragraph 5 - Concrete plan for the coming week: Give 2-3 specific, actionable recommendations for the week ahead. Make them practical and tied directly to the patterns you identified. Not generic advice.
+
+Each paragraph should be 2-4 sentences. Warm, coach-like tone. No bullet points. No headers. Just paragraphs.
+Use Telegram formatting: *bold* for key numbers, food names, or important insights.
 Reply in the same language the user typically uses."""
 
     response = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=350,
+        max_tokens=700,
         messages=[{"role": "user", "content": prompt}]
     )
 
