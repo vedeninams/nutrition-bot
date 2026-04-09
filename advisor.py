@@ -204,31 +204,37 @@ def log_confirmation(items: list[dict], user_id: int) -> str:
     dish_blocks = "\n".join(_fmt_dish_group(g) for g in groups.values())
 
     if len(groups) == 1 and len(items) == 1:
-        # Single standalone item -just show it once
+        # Single standalone item - just show it once
         i = items[0]
         emoji = _food_emoji(i.get("dish_name") or i.get("dish", ""))
+        grams = _parse_grams(i.get("dish", ""))
+        grams_str = f" - {grams:.0f}g" if grams > 0 else ""
         item_lines = (
-            f"✅ Logged: {emoji} *{i.get('dish_name') or i.get('dish', '?')}*\n"
-            f"   {i.get('kcal', 0):.0f} kcal -{i.get('protein_g', 0):.0f}g protein"
+            f"✅ Logged: {emoji} *{i.get('dish_name') or i.get('dish', '?')}*"
+            f"{grams_str} - {i.get('kcal', 0):.0f} kcal - {i.get('protein_g', 0):.0f}g protein"
         )
     elif len(groups) == 1:
-        # One dish, multiple ingredients -show dish name once as header, then ingredients only
+        # One dish, multiple ingredients - show dish name once as header, then ingredients only
         dish_name = list(groups.keys())[0]
         g = list(groups.values())[0]
         emoji = _food_emoji(dish_name)
+        total_grams = sum(_parse_grams(i.get("dish", "")) for i in g)
+        grams_str = f" - {total_grams:.0f}g" if total_grams > 0 else ""
         ingredient_lines = "\n".join(
-            f"  · {i.get('dish', '?')} -{i.get('kcal', 0):.0f} kcal -{i.get('protein_g', 0):.0f}g protein"
+            f"  · {i.get('dish', '?')} - {i.get('kcal', 0):.0f} kcal - {i.get('protein_g', 0):.0f}g protein"
             for i in g
         )
         item_lines = (
-            f"✅ Logged {emoji} *{dish_name}* ({len(items)} ingredients, "
-            f"{total_kcal:.0f} kcal / {total_protein:.0f}g protein):\n{ingredient_lines}"
+            f"✅ Logged {emoji} *{dish_name}* - {len(items)} items"
+            f"{grams_str} - {total_kcal:.0f} kcal - {total_protein:.0f}g protein:\n{ingredient_lines}"
         )
     else:
         # Multiple dishes
+        total_grams = sum(_parse_grams(i.get("dish", "")) for i in items)
+        grams_str = f" - {total_grams:.0f}g" if total_grams > 0 else ""
         item_lines = (
-            f"✅ Logged {len(groups)} dish(es), {len(items)} item(s) total "
-            f"({total_kcal:.0f} kcal / {total_protein:.0f}g protein):\n{dish_blocks}"
+            f"✅ Logged {len(groups)} dishes - {len(items)} items"
+            f"{grams_str} - {total_kcal:.0f} kcal - {total_protein:.0f}g protein:\n{dish_blocks}"
         )
 
     summary = f"\n\n{_fmt_totals(totals, goal)}"
