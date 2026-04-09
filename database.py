@@ -365,6 +365,7 @@ def scale_dish_items(user_id: int, dish_name: str, factor: float) -> int:
     Multiply all macro values of every non-deleted item in this dish by factor.
     E.g. factor=0.5 → user ate half the dish.
     Returns the number of rows updated.
+    Uses case-insensitive matching so "udon noodle bowl" matches "Udon Noodle Bowl".
     """
     conn = get_conn()
     with conn:
@@ -375,7 +376,7 @@ def scale_dish_items(user_id: int, dish_name: str, factor: float) -> int:
                    fat_g     = ROUND(fat_g     * ?, 1),
                    carbs_g   = ROUND(carbs_g   * ?, 1),
                    sugar_g   = ROUND(sugar_g   * ?, 1)
-               WHERE user_id = ? AND dish_name = ? AND confidence != 'deleted'""",
+               WHERE user_id = ? AND LOWER(dish_name) = LOWER(?) AND confidence != 'deleted'""",
             (factor, factor, factor, factor, factor, user_id, dish_name)
         )
     conn.close()
@@ -401,13 +402,14 @@ def delete_duplicate_dishes(user_id: int, dish_name: str) -> int:
     Keep the FIRST logged batch of dish_name today, delete all subsequent ones.
     'First batch' = items logged within 2 min of the earliest timestamp for that dish.
     Returns count of deleted rows.
+    Uses case-insensitive matching.
     """
     today = date.today().isoformat()
     conn = get_conn()
 
     first_row = conn.execute(
         """SELECT MIN(logged_at) AS first_ts FROM meals
-           WHERE user_id = ? AND dish_name = ? AND date(logged_at) = ?
+           WHERE user_id = ? AND LOWER(dish_name) = LOWER(?) AND date(logged_at) = ?
              AND confidence != 'deleted'""",
         (user_id, dish_name, today)
     ).fetchone()
@@ -422,7 +424,7 @@ def delete_duplicate_dishes(user_id: int, dish_name: str) -> int:
     with conn:
         cur = conn.execute(
             """UPDATE meals SET confidence = 'deleted'
-               WHERE user_id = ? AND dish_name = ? AND date(logged_at) = ?
+               WHERE user_id = ? AND LOWER(dish_name) = LOWER(?) AND date(logged_at) = ?
                  AND confidence != 'deleted'
                  AND (strftime('%s', logged_at) - strftime('%s', ?)) > 120""",
             (user_id, dish_name, today, first_ts)
@@ -434,13 +436,14 @@ def delete_duplicate_dishes(user_id: int, dish_name: str) -> int:
 def delete_by_dish_name(user_id: int, dish_name: str) -> int:
     """
     Soft-delete all non-deleted items for this user that share the given dish_name.
+    Uses case-insensitive matching so "udon noodle bowl" matches "Udon Noodle Bowl".
     Returns the number of rows deleted.
     """
     conn = get_conn()
     with conn:
         cur = conn.execute(
             """UPDATE meals SET confidence = 'deleted'
-               WHERE user_id = ? AND dish_name = ? AND confidence != 'deleted'""",
+               WHERE user_id = ? AND LOWER(dish_name) = LOWER(?) AND confidence != 'deleted'""",
             (user_id, dish_name)
         )
     conn.close()

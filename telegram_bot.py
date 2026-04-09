@@ -450,6 +450,10 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 dish_name = result.get("dish_name")
                 if dish_name:
                     deleted = db.delete_by_dish_name(user_id, dish_name)
+                    if deleted == 0 and meal_ids:
+                        # dish_name didn't match (wording/casing difference) —
+                        # fall back to the explicit IDs Claude already resolved
+                        deleted = sum(1 for mid in meal_ids if db.delete_meal(mid))
                     reply_lines.append(f"🗑 Removed *{dish_name}* ({deleted} items)")
                 elif meal_ids:
                     deleted = sum(1 for mid in meal_ids if db.delete_meal(mid))
