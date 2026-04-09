@@ -33,18 +33,23 @@ use that to adjust your estimates.
 IMPORTANT: You must reply with ONLY a JSON array. No prose, no explanation.
 Each element must have exactly these keys:
   dish_name   — string, the NAME OF THE WHOLE DISH OR PLATE (e.g. "Udon Bowl",
-                "Caesar Salad", "Oats"). ALL components of the same plate share the
-                EXACT SAME dish_name. For a single standalone item dish_name = dish.
+                "Caesar Salad", "Eggs & Avocado"). ALL components of the same plate
+                share the EXACT SAME dish_name. For a single standalone item dish_name = dish.
                 Keep dish_name SHORT — drop filler words ("with", "and", "of").
-  dish        — string, the individual ingredient or component. Keep it SHORT:
-                drop redundant words, use the minimal recognisable name + weight.
+                NEVER use meal type words as dish_name: never "Breakfast", "Lunch",
+                "Dinner", "Snack". Use a real food name instead.
+  dish        — string, the individual ingredient or component. Keep it SHORT.
+                ALWAYS include a gram (or ml) weight for every ingredient — estimate
+                if not visible. Whole items get typical weights (egg ≈ 60g, small
+                avocado half ≈ 70g, banana ≈ 120g).
                 Examples: "Feta cheese 50g" → "Feta 50g"
                           "Sesame seeds & nigella seeds 5g" → "Sesame & nigella 5g"
                           "Bulgur/couscous salad (kisir) 100g" → "Bulgur & couscous 100g"
                           "Mixed greens (spinach/arugula) 50g" → "Mixed greens 50g"
                           "Dressing (small pot, est. 30ml)" → "Dressing 30ml"
-                          "Hard-boiled egg 1 whole" → "Boiled egg"
+                          "Hard-boiled egg 1 whole" → "Boiled egg 60g"
                           "Diced chicken breast 120g" → "Chicken breast 120g"
+                          "Avocado 1/2 small" → "Avocado 70g"
   kcal        — number (integer or float)
   protein_g   — number
   fat_g       — number
@@ -87,9 +92,11 @@ IMPORTANT: Reply with ONLY a JSON array. Each element must have these keys:
   dish_name   — the name of the whole dish/meal, kept SHORT (e.g. "Oats", "Salad", "Udon Bowl").
                 All ingredients of the same dish share the SAME dish_name.
                 For a single standalone item, dish_name = dish.
-  dish        — the individual ingredient, SHORT + weight. Drop redundant words:
-                "Rolled oats 80g" → "Oats 80g", "Banana slices 1 medium" → "Banana",
-                "Hard-boiled egg 1 whole" → "Boiled egg", "Feta cheese 50g" → "Feta 50g"
+                NEVER use meal type words: never "Breakfast", "Lunch", "Dinner", "Snack".
+  dish        — the individual ingredient, SHORT + always include a gram/ml weight.
+                Estimate weight for whole items (egg ≈ 60g, banana ≈ 120g, small avocado half ≈ 70g).
+                "Rolled oats 80g" → "Oats 80g", "Banana 1 medium" → "Banana 120g",
+                "Hard-boiled egg 1 whole" → "Boiled egg 60g", "Feta cheese 50g" → "Feta 50g"
   kcal, protein_g, fat_g, carbs_g, sugar_g, confidence, meal_type
 
 For meal_type detect it from the user's words:
