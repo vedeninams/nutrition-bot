@@ -613,13 +613,14 @@ Last 5 days:
 
 {f"User profile: {profile}" if profile else ""}
 
-Write a SHORT evening message (max 3 sentences total):
-1. One sentence on what went well today (be specific — mention protein, balance, staying under goal, etc.)
-2. One sentence pattern observation from the last 5 days (e.g. consistently low protein, good calorie control, etc.)
-3. One concrete, actionable tip for tomorrow based on what you see.
+Write a SHORT evening message in exactly 3 separate paragraphs (one sentence each, separated by a blank line):
 
-Be warm and specific, not generic. No bullet points. No headers. Just plain flowing text.
-Use Telegram formatting: *bold* for emphasis only. Reply in the same language the user typically uses."""
+Paragraph 1: What went well today — be specific (mention protein, staying under goal, balance, variety, etc.)
+Paragraph 2: A pattern you notice from the last 5 days (e.g. consistently low protein, good calorie control, heavy on carbs, etc.)
+Paragraph 3: One concrete, actionable tip for tomorrow based on what you see.
+
+Be warm and specific, not generic. Use Telegram formatting: *bold* for emphasis only.
+Reply in the same language the user typically uses."""
 
     response = client.messages.create(
         model="claude-sonnet-4-6",
