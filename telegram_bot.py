@@ -358,16 +358,11 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(_safe_reply(text_reply), parse_mode=ParseMode.MARKDOWN)
         return
 
-    # ── Natural language: yesterday summary ──────────────────────────────────
-    if intent == "cmd_yesterday":
-        from datetime import date as _date, timedelta as _td
-        yesterday = (_date.today() - _td(days=1)).isoformat()
-        # Format label like "Yesterday (April 8th)"
-        dt = _date.fromisoformat(yesterday)
-        day_label = dt.strftime("%-d")  # e.g. "8"
-        suffix = {"1":"st","2":"nd","3":"rd"}.get(day_label[-1] if day_label[-1] in "123" and day_label not in ("11","12","13") else "x", "th")
-        label = f"Yesterday ({dt.strftime('%B')} {day_label}{suffix})"
-        text_reply = advisor.day_summary(user_id, yesterday, label)
+    # ── Natural language: specific past day summary ───────────────────────────
+    if intent == "cmd_date_query":
+        from datetime import date as _date
+        query_date, label = analyzer.extract_query_date(text, _date.today().isoformat())
+        text_reply = advisor.day_summary(user_id, query_date, label)
         await update.message.reply_text(_safe_reply(text_reply), parse_mode=ParseMode.MARKDOWN)
         return
 

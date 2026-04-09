@@ -406,7 +406,7 @@ Classify the user's message into exactly one of these intents:
   correction    — fixing or deleting a previous log entry (e.g. "actually it was a whole avocado", "remove the yogurt", "that was wrong")
   question      — asking for advice, information, or analysis (e.g. "how much protein today?", "what should my calorie goal be?", "is my diet balanced?", "what should I eat for dinner?")
   cmd_today     — wants to see TODAY's food log summary (e.g. "show today", "what did I eat today", "today's summary")
-  cmd_yesterday — wants to see YESTERDAY's food log (e.g. "what did I eat yesterday", "show yesterday", "my food yesterday", "yesterday's summary", "what was my food yesterday")
+  cmd_date_query — wants to see food log for a SPECIFIC past day (e.g. "what did I eat yesterday", "show yesterday", "what did I eat on Tuesday", "my food last Monday", "show me Wednesday", "what was my food on April 7th")
   cmd_week      — wants weekly food log review (e.g. "how was my week", "weekly summary", "show this week")
   cmd_goal      — wants to CHANGE or SET their calorie goal to a specific number (e.g. "set my goal to 1800", "change my goal to 2200 calories") — NOT asking what it should be
   preference    — sharing a personal preference, restriction, or fact about themselves to be remembered (e.g. "I don't eat fish", "I'm vegetarian", "I'm allergic to nuts", "remember I go to the gym 3x a week", "I weigh 67kg", "my height is 165cm")
@@ -417,7 +417,8 @@ IMPORTANT:
 - "I don't eat fish", "please remember I hate cilantro", "I'm lactose intolerant" → preference
 - "wait, actually this was breakfast" → question
 - correction is ONLY when changing a specific logged food item
-- ANY mention of "yesterday" when asking about food/eating → cmd_yesterday (NOT cmd_today)
+- ANY mention of a specific past day when asking about food/eating → cmd_date_query (NOT cmd_today)
+  Examples: "yesterday", "Tuesday", "last Monday", "April 7th" → cmd_date_query
 
 Reply with ONLY the intent word, nothing else. No explanation, no punctuation."""
 
@@ -451,7 +452,7 @@ def detect_intent(text: str) -> str:
             messages=[{"role": "user", "content": text}],
         )
         intent = response.content[0].text.strip().lower()
-        valid = {"log_text", "correction", "question", "cmd_today", "cmd_yesterday", "cmd_week", "cmd_goal", "preference"}
+        valid = {"log_text", "correction", "question", "cmd_today", "cmd_date_query", "cmd_week", "cmd_goal", "preference"}
         return intent if intent in valid else "log_text"
     except Exception:
         t = text.lower()
@@ -460,6 +461,47 @@ def detect_intent(text: str) -> str:
         if t.endswith("?") or any(t.startswith(s) for s in ["how", "what", "сколько"]):
             return "question"
         return "log_text"
+
+
+def extract_query_date(text: str, today_str: str) -> tuple[str, str]:
+    """
+    Given a user message like "what did I eat on Tuesday" or "show me yesterday",
+    return (date_str, label) where date_str is YYYY-MM-DD and label is a human
+    friendly string like "Yesterday (April 8th)" or "Tuesday (April 7th)".
+
+    today_str: today's date as YYYY-MM-DD (passed in so we don't have to import datetime here)
+    """
+    system = f"""Today is {today_str}.
+The user is asking about a past day's food log.
+Extract which date they mean and return ONLY a JSON object with two keys:
+  "date": the date in YYYY-MM-DD format
+  "label": a human-friendly label like "Yesterday (April 8th)" or "Tuesday (April 7th)" or "Last Monday (April 6th)"
+
+Rules:
+- "yesterday" → previous calendar day
+- A weekday name like "Tuesday" → the most recent past Tuesday (never today or future)
+- "last Monday" → the Monday of last week
+- A specific date like "April 7th" → that date in the current or most recent year
+- Always return a date in the past (not today, not future)
+
+Return ONLY valid JSON, no prose."""
+
+    response = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=60,
+        system=system,
+        messages=[{"role": "user", "content": text}],
+    )
+    raw = response.content[0].text.strip()
+    clean = re.sub(r"```(?:json)?", "", raw).replace("```", "").strip()
+    try:
+        parsed = json.loads(clean)
+        return parsed["date"], parsed["label"]
+    except Exception:
+        # Fallback to yesterday if parsing fails
+        from datetime import date as _date, timedelta as _td
+        yesterday = (_date.today() - _td(days=1)).isoformat()
+        return yesterday, "Yesterday"
 
 
 def parse_health_message(text: str) -> dict:
