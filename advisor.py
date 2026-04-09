@@ -317,93 +317,86 @@ def daily_morning_summary(user_id: int) -> str:
 
 def weekly_review(user_id: int) -> str:
     """
-    Comprehensive weekly review with Claude analysis.
-    Includes food, activity, and weight trend if available.
+    Sunday review using up to 30 days of data.
+    Stats header + 3-paragraph AI analysis (this week / longer pattern / recommendation).
     """
     user = db.get_user(user_id) or {}
     goal = user.get("daily_kcal", 2000)
-    week_data = db.get_week_totals(user_id)
-    week_stats = db.get_week_stats(user_id)
+    month_data = db.get_month_totals(user_id)   # up to 30 days
+    week_stats  = db.get_week_stats(user_id)    # activity for past 7 days
 
-    if not week_data:
-        return "📅 *Weekly review:* No data logged this week yet. Start tracking and I'll give you insights!"
+    if not month_data:
+        return "📅 *Sunday Review:* No data logged yet. Start tracking this week and I'll give you insights!"
 
-    # Build nutrition table for Claude
-    table_lines = ["Day | kcal eaten | protein | fat | carbs | burned | net"]
-    # Index activity stats by date for easy lookup
-    stats_by_date = {s["date"]: s for s in week_stats}
-    for row in week_data:
-        activity = stats_by_date.get(row["day"], {})
-        burned = activity.get("kcal_burned_est") or 0
-        net = row["kcal"] - burned
-        table_lines.append(
-            f"{row['day']} | {row['kcal']:.0f} | {row['protein_g']:.0f}g | "
-            f"{row['fat_g']:.0f}g | {row['carbs_g']:.0f}g | "
-            f"{'~' + str(int(burned)) if burned else '—'} | {net:.0f}"
-        )
-    table = "\n".join(table_lines)
+    # Last 7 days vs older days
+    today_str = date.today().isoformat()
+    week_ago  = (date.today() - timedelta(days=7)).isoformat()
+    this_week = [d for d in month_data if d["day"] > week_ago]
+    older     = [d for d in month_data if d["day"] <= week_ago]
 
-    # Weight trend
-    weights = [
-        (s["date"], s["weight_kg"])
-        for s in week_stats
-        if s.get("weight_kg")
-    ]
-    weight_section = ""
+    def _avg(rows, key):
+        vals = [r[key] for r in rows if r[key]]
+        return sum(vals) / len(vals) if vals else 0
+
+    avg_kcal_week  = _avg(this_week, "kcal")
+    avg_prot_week  = _avg(this_week, "protein_g")
+    avg_kcal_month = _avg(month_data, "kcal")
+    avg_prot_month = _avg(month_data, "protein_g")
+    days_on_track  = sum(1 for r in this_week if abs(r["kcal"] - goal) / goal < 0.15)
+
+    # Weight trend from activity stats
+    weights = [(s["date"], s["weight_kg"]) for s in week_stats if s.get("weight_kg")]
+    weight_line = ""
     if weights:
         w_first, w_last = weights[0][1], weights[-1][1]
         delta = w_last - w_first
-        trend = f"↓ {abs(delta):.1f} kg" if delta < 0 else (f"↑ {delta:.1f} kg" if delta > 0 else "stable")
-        weight_section = f"\nWeight this week: {w_first:.1f} kg → {w_last:.1f} kg ({trend})"
+        arrow = f"↓ {abs(delta):.1f} kg" if delta < 0 else (f"↑ {delta:.1f} kg" if delta > 0 else "stable")
+        weight_line = f"Weight: {w_first:.1f} → {w_last:.1f} kg ({arrow})"
 
-    # Activity summary
-    total_steps = sum(s.get("steps") or 0 for s in week_stats)
-    active_days = sum(1 for s in week_stats if s.get("workouts") and len(s["workouts"]) > 0)
-    activity_section = ""
-    if total_steps or active_days:
-        activity_section = f"\nActivity: {total_steps:,} total steps, {active_days} workout day(s)"
+    # Stats header (numbers only, no AI)
+    header_parts = [
+        f"📅 *Sunday Review* ({len(month_data)} days logged)",
+        f"This week: avg *{avg_kcal_week:.0f} kcal/day* — *{avg_prot_week:.0f}g protein* — on-track {days_on_track}/{len(this_week)} days",
+    ]
+    if older:
+        header_parts.append(f"Past month avg: {avg_kcal_month:.0f} kcal/day — {avg_prot_month:.0f}g protein")
+    if weight_line:
+        header_parts.append(weight_line)
+    header = "\n".join(header_parts)
+
+    # Build data summary for Claude
+    month_summary = "\n".join(
+        f"  {d['day']}: {d['kcal']:.0f} kcal, {d['protein_g']:.0f}g protein, "
+        f"{d['fat_g']:.0f}g fat, {d['carbs_g']:.0f}g carbs"
+        for d in month_data
+    )
 
     profile = db.get_profile_for_prompt(user_id)
-    prompt = f"""The user's weekly data:
-Daily calorie goal: {goal} kcal
-{f"{chr(10)}{profile}" if profile else ""}
-{table}{weight_section}{activity_section}
+    prompt = f"""You are a supportive personal nutritionist sending a Sunday monthly overview message.
 
-Write a SHORT, friendly weekly review (max 200 words). Include:
-- Overall verdict on eating (over/under/on target, mention net calories if burn data is present)
-- Weight trend comment if weight data is available
-- One positive observation
-- One concrete suggestion for next week that respects the user's preferences
-- An encouraging closing line
+User's daily calorie goal: {goal} kcal
+{f"User profile: {profile}" if profile else ""}
 
-Note: "net" column = calories eaten minus calories burned from exercise and walking.
-Use emoji sparingly. Be like a supportive coach.
-Use Telegram formatting: *bold* for emphasis, no markdown tables."""
+Data for the past {len(month_data)} days (all available history):
+{month_summary}
+
+Write exactly 3 short paragraphs separated by blank lines:
+
+Paragraph 1: This week's verdict — how did they do vs goal, protein, consistency. Be specific with numbers.
+Paragraph 2: A pattern you notice over the full history (longer trends, recurring habits, what's improving or stuck).
+Paragraph 3: One focused diet recommendation for the coming week based on everything you see. Make it concrete and actionable.
+
+Keep each paragraph to 1-2 sentences. Warm, coach-like tone. No bullet points. No headers.
+Use Telegram formatting: *bold* for key numbers/words only.
+Reply in the same language the user typically uses."""
 
     response = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=500,
+        max_tokens=350,
         messages=[{"role": "user", "content": prompt}]
     )
 
-    avg_kcal = sum(r["kcal"] for r in week_data) / len(week_data)
-    avg_burned = (
-        sum(s.get("kcal_burned_est") or 0 for s in week_stats) / len(week_stats)
-        if week_stats else 0
-    )
-    days_on_track = sum(1 for r in week_data if abs(r["kcal"] - goal) / goal < 0.15)
-
-    header_parts = [
-        f"📅 *Weekly Review*",
-        f"Avg eaten: {avg_kcal:.0f} kcal/day | Goal: {goal} kcal | On-track: {days_on_track}/{len(week_data)} days",
-    ]
-    if avg_burned:
-        header_parts.append(f"Avg burned: ~{avg_burned:.0f} kcal/day | Avg net: ~{avg_kcal - avg_burned:.0f} kcal/day")
-    if weights:
-        header_parts.append(f"Weight: {weights[0][1]:.1f} → {weights[-1][1]:.1f} kg")
-
-    header = "\n".join(header_parts) + "\n\n"
-    return header + response.content[0].text
+    return f"{header}\n\n💬 {response.content[0].text.strip()}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

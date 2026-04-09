@@ -644,6 +644,28 @@ def get_recent_meals(user_id: int, limit: int = 5) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_month_totals(user_id: int) -> list[dict]:
+    """Daily totals for the past 30 days — used for monthly Sunday review."""
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT
+               date(logged_at) AS day,
+               COALESCE(SUM(kcal), 0)      AS kcal,
+               COALESCE(SUM(protein_g), 0) AS protein_g,
+               COALESCE(SUM(fat_g), 0)     AS fat_g,
+               COALESCE(SUM(carbs_g), 0)   AS carbs_g
+           FROM meals
+           WHERE user_id = ?
+             AND date(logged_at) >= date('now', '-29 days')
+             AND confidence != 'deleted'
+           GROUP BY day
+           ORDER BY day""",
+        (user_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def get_week_totals(user_id: int) -> list[dict]:
     """Daily totals for the past 7 days — used for weekly review."""
     conn = get_conn()
