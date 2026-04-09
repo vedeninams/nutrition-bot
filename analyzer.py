@@ -32,12 +32,18 @@ use that to adjust your estimates.
 
 IMPORTANT: You must reply with ONLY a JSON array. No prose, no explanation.
 Each element must have exactly these keys:
-  dish_name   — string, the NAME OF THE WHOLE DISH OR PLATE (e.g. "Udon Bowl",
-                "Caesar Salad", "Eggs & Avocado"). ALL components of the same plate
-                share the EXACT SAME dish_name. For a single standalone item dish_name = dish.
-                Keep dish_name SHORT — drop filler words ("with", "and", "of").
-                NEVER use meal type words as dish_name: never "Breakfast", "Lunch",
-                "Dinner", "Snack". Use a real food name instead.
+  dish_name   — string, the NAME OF THE WHOLE DISH OR PLATE. ALL components of the
+                same plate share the EXACT SAME dish_name.
+                For a PLATE/MEAL (multiple ingredients eaten together), name it by
+                SIZE + MEAL TYPE based on how many ingredients it has:
+                  ≤ 3 ingredients  → "Small [MealType]"   e.g. "Small Breakfast"
+                  4–6 ingredients  → "Medium [MealType]"  e.g. "Medium Lunch"
+                  ≥ 7 ingredients  → "Big [MealType]"     e.g. "Big Dinner"
+                Use the meal_type from the caption ("breakfast","lunch","dinner","snack").
+                If meal_type is not mentioned in the caption, use "Plate" instead:
+                  "Small Plate", "Medium Plate", "Big Plate"
+                For a SINGLE STANDALONE ITEM (one apple, one coffee, one yogurt),
+                dish_name = dish (the item name). No size prefix needed.
   dish        — string, the individual ingredient or component. Keep it SHORT.
                 ALWAYS include a gram (or ml) weight for every ingredient — estimate
                 if not visible. Whole items get typical weights (egg ≈ 60g, small
@@ -89,10 +95,13 @@ Estimate the nutritional values based on the description.
 If quantities are vague ("a bowl", "some"), make a realistic estimate for an average portion.
 
 IMPORTANT: Reply with ONLY a JSON array. Each element must have these keys:
-  dish_name   — the name of the whole dish/meal, kept SHORT (e.g. "Oats", "Salad", "Udon Bowl").
-                All ingredients of the same dish share the SAME dish_name.
+  dish_name   — the name of the whole dish/meal. All ingredients of the same dish share the SAME dish_name.
+                For a PLATE/MEAL name it by SIZE + MEAL TYPE based on ingredient count:
+                  ≤ 3 ingredients  → "Small [MealType]"  e.g. "Small Breakfast", "Small Lunch"
+                  4–6 ingredients  → "Medium [MealType]" e.g. "Medium Dinner"
+                  ≥ 7 ingredients  → "Big [MealType]"    e.g. "Big Lunch"
+                Use meal_type from the user's words; if not mentioned use "Plate" (e.g. "Small Plate").
                 For a single standalone item, dish_name = dish.
-                NEVER use meal type words: never "Breakfast", "Lunch", "Dinner", "Snack".
   dish        — the individual ingredient, SHORT + always include a gram/ml weight.
                 Estimate weight for whole items (egg ≈ 60g, banana ≈ 120g, small avocado half ≈ 70g).
                 "Rolled oats 80g" → "Oats 80g", "Banana 1 medium" → "Banana 120g",

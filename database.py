@@ -297,10 +297,33 @@ def log_meal_items(user_id: int, items: list[dict], source: str = "photo") -> li
             confidence=item.get("confidence", "medium"),
             source=source,
             meal_type=meal_type,
-            total_dish_kcal=total_dish_kcal,  # passed through for classification
+            total_dish_kcal=total_dish_kcal,
             notes=item.get("notes"),
         )
         ids.append(meal_id)
+
+    # If Claude used "Plate" in dish_name (no caption meal_type), replace it with
+    # the actual classified meal_type now that we know it.
+    # e.g. "Small Plate" → "Small Breakfast", "Medium Plate" → "Medium Lunch"
+    if ids:
+        conn = get_conn()
+        # Look up what meal_type was actually assigned to the first logged item
+        first_row = conn.execute(
+            "SELECT meal_type FROM meals WHERE id = ?", (ids[0],)
+        ).fetchone()
+        if first_row:
+            actual_meal_type = first_row["meal_type"].capitalize()  # e.g. "Breakfast"
+            with conn:
+                conn.execute(
+                    """UPDATE meals SET dish_name = REPLACE(dish_name, 'Plate', ?)
+                       WHERE id IN ({})
+                         AND dish_name LIKE '%Plate%'""".format(
+                        ",".join("?" * len(ids))
+                    ),
+                    (actual_meal_type, *ids)
+                )
+        conn.close()
+
     return ids
 
 
