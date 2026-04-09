@@ -577,10 +577,10 @@ async def run_daily_summary():
 
 
 async def run_evening_summary():
-    """21:00 push — today's food log + how you stand vs goal."""
+    """21:00 push — today's food log + AI analysis + 5-day recommendation."""
     from telegram import Bot
     bot = Bot(token=BOT_TOKEN)
-    await _push_to_all_users(advisor.today_summary, bot)
+    await _push_to_all_users(advisor.evening_summary, bot)
     log.info("Evening summary sent.")
 
 

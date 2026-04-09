@@ -570,6 +570,67 @@ def day_summary(user_id: int, for_date: str, label: str) -> str:
     return "\n".join(parts)
 
 
+def evening_summary(user_id: int) -> str:
+    """
+    Evening push summary: today's full log + short AI analysis of what went well
+    and a recommendation based on the last 5 days of eating habits.
+    """
+    # Build the standard today log
+    base = day_summary(user_id, date.today().isoformat(), "Today")
+
+    # Gather data for the AI analysis
+    user = db.get_user(user_id) or {}
+    goal = user.get("daily_kcal", 2000)
+    profile = db.get_profile_for_prompt(user_id)
+    today_totals = db.get_today_totals(user_id)
+    week_data = db.get_week_totals(user_id)  # last 7 days daily totals
+    activity = db.get_daily_stats(user_id, date.today().isoformat())
+
+    # Build last-5-days context (excluding today)
+    past_days = [d for d in week_data if d["day"] != date.today().isoformat()][-5:]
+
+    past_lines = "\n".join(
+        f"  {d['day']}: {d['kcal']:.0f} kcal, {d['protein_g']:.0f}g protein, "
+        f"{d['fat_g']:.0f}g fat, {d['carbs_g']:.0f}g carbs"
+        for d in past_days
+    ) or "  No data for past days."
+
+    burned = (activity or {}).get("kcal_burned_est") or 0
+    eaten = today_totals.get("kcal", 0)
+    pct = int(eaten / goal * 100) if goal else 0
+
+    prompt = f"""You are a supportive personal nutritionist sending a short evening check-in message.
+
+Today's summary:
+- Calories eaten: {eaten:.0f} kcal ({pct}% of {goal} kcal goal)
+- Protein: {today_totals.get('protein_g', 0):.0f}g
+- Fat: {today_totals.get('fat_g', 0):.0f}g
+- Carbs: {today_totals.get('carbs_g', 0):.0f}g
+{f'- Estimated burn: {burned:.0f} kcal (net {eaten - burned:.0f} kcal)' if burned else ''}
+
+Last 5 days:
+{past_lines}
+
+{f"User profile: {profile}" if profile else ""}
+
+Write a SHORT evening message (max 3 sentences total):
+1. One sentence on what went well today (be specific — mention protein, balance, staying under goal, etc.)
+2. One sentence pattern observation from the last 5 days (e.g. consistently low protein, good calorie control, etc.)
+3. One concrete, actionable tip for tomorrow based on what you see.
+
+Be warm and specific, not generic. No bullet points. No headers. Just plain flowing text.
+Use Telegram formatting: *bold* for emphasis only. Reply in the same language the user typically uses."""
+
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=200,
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    analysis = response.content[0].text.strip()
+    return f"{base}\n\n💬 {analysis}"
+
+
 def today_summary(user_id: int) -> str:
     """On-demand summary of today's meals + activity."""
     return day_summary(user_id, date.today().isoformat(), "Today so far")
