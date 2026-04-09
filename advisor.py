@@ -209,9 +209,10 @@ def log_confirmation(items: list[dict], user_id: int) -> str:
         emoji = _food_emoji(i.get("dish_name") or i.get("dish", ""))
         grams = _parse_grams(i.get("dish", ""))
         grams_str = f" - {grams:.0f}g" if grams > 0 else ""
+        stats = f"{grams:.0f}g - " if grams > 0 else ""
         item_lines = (
-            f"✅ Logged: {emoji} *{i.get('dish_name') or i.get('dish', '?')}*"
-            f"{grams_str} - {i.get('kcal', 0):.0f} kcal - {i.get('protein_g', 0):.0f}g protein"
+            f"✅ Logged: {emoji} *{i.get('dish_name') or i.get('dish', '?')}*\n"
+            f"{stats}{i.get('kcal', 0):.0f} kcal - {i.get('protein_g', 0):.0f}g protein"
         )
     elif len(groups) == 1:
         # One dish, multiple ingredients - show dish name once as header, then ingredients only
@@ -225,16 +226,16 @@ def log_confirmation(items: list[dict], user_id: int) -> str:
             for i in g
         )
         item_lines = (
-            f"✅ Logged {emoji} *{dish_name}* - {len(items)} items"
-            f"{grams_str} - {total_kcal:.0f} kcal - {total_protein:.0f}g protein:\n{ingredient_lines}"
+            f"✅ Logged {emoji} *{dish_name}*\n"
+            f"{len(items)} items{grams_str} - {total_kcal:.0f} kcal - {total_protein:.0f}g protein:\n{ingredient_lines}"
         )
     else:
         # Multiple dishes
         total_grams = sum(_parse_grams(i.get("dish", "")) for i in items)
         grams_str = f" - {total_grams:.0f}g" if total_grams > 0 else ""
         item_lines = (
-            f"✅ Logged {len(groups)} dishes - {len(items)} items"
-            f"{grams_str} - {total_kcal:.0f} kcal - {total_protein:.0f}g protein:\n{dish_blocks}"
+            f"✅ Logged {len(groups)} dishes\n"
+            f"{len(items)} items{grams_str} - {total_kcal:.0f} kcal - {total_protein:.0f}g protein:\n{dish_blocks}"
         )
 
     summary = f"\n\n{_fmt_totals(totals, goal)}"
