@@ -402,13 +402,14 @@ def resolve_correction(
 INTENT_SYSTEM_PROMPT = """You are a router for a nutrition tracking bot.
 Classify the user's message into exactly one of these intents:
 
-  log_text    — describing food they ate (e.g. "I had oatmeal with banana", "for breakfast I ate eggs")
-  correction  — fixing or deleting a previous log entry (e.g. "actually it was a whole avocado", "remove the yogurt", "that was wrong")
-  question    — asking for advice, information, or analysis (e.g. "how much protein today?", "what should my calorie goal be?", "is my diet balanced?", "what should I eat for dinner?")
-  cmd_today   — wants to see today's food log summary (e.g. "show today", "what did I eat today", "today's summary")
-  cmd_week    — wants weekly food log review (e.g. "how was my week", "weekly summary", "show this week")
-  cmd_goal    — wants to CHANGE or SET their calorie goal to a specific number (e.g. "set my goal to 1800", "change my goal to 2200 calories") — NOT asking what it should be
-  preference  — sharing a personal preference, restriction, or fact about themselves to be remembered (e.g. "I don't eat fish", "I'm vegetarian", "I'm allergic to nuts", "remember I go to the gym 3x a week", "I weigh 67kg", "my height is 165cm")
+  log_text      — describing food they ate (e.g. "I had oatmeal with banana", "for breakfast I ate eggs")
+  correction    — fixing or deleting a previous log entry (e.g. "actually it was a whole avocado", "remove the yogurt", "that was wrong")
+  question      — asking for advice, information, or analysis (e.g. "how much protein today?", "what should my calorie goal be?", "is my diet balanced?", "what should I eat for dinner?")
+  cmd_today     — wants to see TODAY's food log summary (e.g. "show today", "what did I eat today", "today's summary")
+  cmd_yesterday — wants to see YESTERDAY's food log (e.g. "what did I eat yesterday", "show yesterday", "my food yesterday", "yesterday's summary", "what was my food yesterday")
+  cmd_week      — wants weekly food log review (e.g. "how was my week", "weekly summary", "show this week")
+  cmd_goal      — wants to CHANGE or SET their calorie goal to a specific number (e.g. "set my goal to 1800", "change my goal to 2200 calories") — NOT asking what it should be
+  preference    — sharing a personal preference, restriction, or fact about themselves to be remembered (e.g. "I don't eat fish", "I'm vegetarian", "I'm allergic to nuts", "remember I go to the gym 3x a week", "I weigh 67kg", "my height is 165cm")
 
 IMPORTANT:
 - "what should my goal be?" → question
@@ -416,6 +417,7 @@ IMPORTANT:
 - "I don't eat fish", "please remember I hate cilantro", "I'm lactose intolerant" → preference
 - "wait, actually this was breakfast" → question
 - correction is ONLY when changing a specific logged food item
+- ANY mention of "yesterday" when asking about food/eating → cmd_yesterday (NOT cmd_today)
 
 Reply with ONLY the intent word, nothing else. No explanation, no punctuation."""
 
@@ -449,7 +451,7 @@ def detect_intent(text: str) -> str:
             messages=[{"role": "user", "content": text}],
         )
         intent = response.content[0].text.strip().lower()
-        valid = {"log_text", "correction", "question", "cmd_today", "cmd_week", "cmd_goal", "preference"}
+        valid = {"log_text", "correction", "question", "cmd_today", "cmd_yesterday", "cmd_week", "cmd_goal", "preference"}
         return intent if intent in valid else "log_text"
     except Exception:
         t = text.lower()

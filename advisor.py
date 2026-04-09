@@ -493,27 +493,27 @@ def _fmt_activity(stats: dict) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. Today summary (on demand via /today command)
+# 5. Day summary — works for any date (today, yesterday, etc.)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def today_summary(user_id: int) -> str:
+def day_summary(user_id: int, for_date: str, label: str) -> str:
     """
-    On-demand summary of today's meals + activity if available.
-    Meals are grouped by dish_name so multi-ingredient dishes appear as one block.
+    On-demand meal summary for any calendar date.
+    for_date: YYYY-MM-DD string
+    label:    display label shown in the header, e.g. "Today" or "Yesterday (April 8th)"
     """
     user = db.get_user(user_id) or {}
     goal = user.get("daily_kcal", 2000)
-    dish_groups = db.get_today_meals_grouped(user_id)
-    totals = db.get_today_totals(user_id)
-    activity = db.get_daily_stats(user_id, date.today().isoformat())
+    dish_groups = db.get_meals_grouped_for_date(user_id, for_date)
+    totals = db.get_totals_for_date(user_id, for_date)
+    activity = db.get_daily_stats(user_id, for_date)
 
     if not dish_groups and not activity:
-        return "📋 Nothing logged yet today. Send me a photo of your food! 📸"
+        return f"📋 Nothing logged for {label}."
 
-    parts = ["📋 *Today so far:*"]
+    parts = [f"📋 *{label}:*"]
 
     if dish_groups:
-        # Group dishes by meal_type for a structured view
         meal_order = ["breakfast", "lunch", "dinner", "snack"]
         by_meal: dict[str, list] = {}
         for group in dish_groups:
@@ -527,14 +527,13 @@ def today_summary(user_id: int) -> str:
             emoji = MEAL_EMOJI.get(mt, "🍽")
             section_lines = [f"{emoji} *{mt.capitalize()}*"]
             for g in by_meal[mt]:
-                ingredients = g["ingredients"]
-                section_lines.append(_fmt_dish_group(ingredients))
+                section_lines.append(_fmt_dish_group(g["ingredients"]))
             meal_sections.append("\n".join(section_lines))
 
         parts.append("\n" + "\n\n".join(meal_sections))
         parts.append(f"\n{_fmt_totals(totals, goal)}")
     else:
-        parts.append("\n_No food logged yet today._")
+        parts.append("\n_No food logged._")
 
     if activity:
         activity_block = _fmt_activity(activity)
@@ -547,3 +546,8 @@ def today_summary(user_id: int) -> str:
                 parts.append(f"\n📊 *Net intake: ~{net:.0f} kcal* (ate {eaten:.0f} — burned {burned:.0f})")
 
     return "\n".join(parts)
+
+
+def today_summary(user_id: int) -> str:
+    """On-demand summary of today's meals + activity."""
+    return day_summary(user_id, date.today().isoformat(), "Today so far")

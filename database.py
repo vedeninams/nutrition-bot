@@ -470,6 +470,68 @@ def get_today_meals(user_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_meals_for_date(user_id: int, date_str: str) -> list[dict]:
+    """All non-deleted meals logged on a specific date (YYYY-MM-DD)."""
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT * FROM meals
+           WHERE user_id = ?
+             AND date(logged_at) = ?
+             AND confidence != 'deleted'
+           ORDER BY logged_at""",
+        (user_id, date_str)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_meals_grouped_for_date(user_id: int, date_str: str) -> list[dict]:
+    """Meals for a specific date grouped by (dish_name, meal_type)."""
+    rows = get_meals_for_date(user_id, date_str)
+    from collections import OrderedDict
+    groups: OrderedDict[tuple, dict] = OrderedDict()
+    for row in rows:
+        key = (row.get("dish_name") or row["dish"], row["meal_type"])
+        if key not in groups:
+            groups[key] = {
+                "dish_name": key[0],
+                "meal_type": row["meal_type"],
+                "kcal": 0.0, "protein_g": 0.0, "fat_g": 0.0,
+                "carbs_g": 0.0, "sugar_g": 0.0,
+                "confidence": row.get("confidence", "medium"),
+                "ingredients": [],
+            }
+        g = groups[key]
+        g["kcal"]      += row.get("kcal", 0)
+        g["protein_g"] += row.get("protein_g", 0)
+        g["fat_g"]     += row.get("fat_g", 0)
+        g["carbs_g"]   += row.get("carbs_g", 0)
+        g["sugar_g"]   += row.get("sugar_g", 0)
+        g["ingredients"].append(row)
+    return list(groups.values())
+
+
+def get_totals_for_date(user_id: int, date_str: str) -> dict:
+    """Summed macros for a specific date."""
+    conn = get_conn()
+    row = conn.execute(
+        """SELECT
+               COALESCE(SUM(kcal), 0)      AS kcal,
+               COALESCE(SUM(protein_g), 0) AS protein_g,
+               COALESCE(SUM(fat_g), 0)     AS fat_g,
+               COALESCE(SUM(carbs_g), 0)   AS carbs_g,
+               COALESCE(SUM(sugar_g), 0)   AS sugar_g,
+               COUNT(*)                    AS items
+           FROM meals
+           WHERE user_id = ?
+             AND date(logged_at) = ?
+             AND confidence != 'deleted'""",
+        (user_id, date_str)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else {}
+
+
 def get_today_meals_grouped(user_id: int) -> list[dict]:
     """
     Today's meals grouped by dish_name + meal_type.
