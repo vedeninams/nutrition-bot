@@ -169,12 +169,14 @@ def _fmt_dish_group(items: list[dict]) -> str:
 
     if len(items) == 1:
         emoji = _food_emoji(dish_name)
+        stats = f"{total_grams:.0f}g - " if total_grams > 0 else ""
         return (
-            f"{emoji} *{dish_name}*{grams_str} - {total_kcal:.0f} kcal - {total_protein:.0f}g protein"
+            f"{emoji} *{dish_name}*\n{stats}{total_kcal:.0f} kcal - {total_protein:.0f}g protein"
         )
     else:
         emoji = _food_emoji(dish_name)
-        header = f"{emoji} *{dish_name}*{grams_str} - {total_kcal:.0f} kcal - {total_protein:.0f}g protein"
+        stats = f"{total_grams:.0f}g - " if total_grams > 0 else ""
+        header = f"{emoji} *{dish_name}*\n{stats}{total_kcal:.0f} kcal - {total_protein:.0f}g protein"
         ingredient_lines = "\n".join(
             f"  · {i.get('dish', '?')} - {i.get('kcal', 0):.0f} kcal - {i.get('protein_g', 0):.0f}g protein"
             for i in items
