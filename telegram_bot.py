@@ -233,6 +233,49 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Voice message handler — transcribes via OpenAI Whisper, then reuses handle_text
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await _typing(update)
+
+    # Download the voice file from Telegram
+    voice = update.message.voice
+    tg_file = await voice.get_file()
+    buf = io.BytesIO()
+    await tg_file.download_to_memory(buf)
+    buf.seek(0)
+    buf.name = "voice.ogg"  # Whisper needs a filename with extension
+
+    # Transcribe with OpenAI Whisper
+    try:
+        from openai import OpenAI
+        openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        transcript = openai_client.audio.transcriptions.create(
+            model="whisper-1",
+            file=buf,
+        )
+        text = transcript.text.strip()
+    except Exception as e:
+        log.error(f"Whisper transcription failed: {e}")
+        await update.message.reply_text("😕 Couldn't transcribe your voice message. Please try again or type it.")
+        return
+
+    if not text:
+        await update.message.reply_text("🤔 I couldn't hear anything. Please try again.")
+        return
+
+    log.info(f"Voice transcribed: {text[:80]}")
+
+    # Echo the transcription so the user knows what was understood
+    await update.message.reply_text(f"🎙 _{text}_", parse_mode=ParseMode.MARKDOWN)
+
+    # Reuse the exact same text handler — voice becomes text
+    update.message.text = text
+    await handle_text(update, ctx)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Text message handler
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -620,6 +663,7 @@ def main():
     app.add_handler(CommandHandler("profile", cmd_profile))
     app.add_handler(CommandHandler("clear_today", cmd_clear_today))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     log.info("🥗 Nutrition bot starting...")
