@@ -270,8 +270,8 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Echo the transcription so the user knows what was understood
     await update.message.reply_text(f"🎙 _{text}_", parse_mode=ParseMode.MARKDOWN)
 
-    # Reuse the exact same text handler — voice becomes text
-    update.message.text = text
+    # Reuse the exact same text handler — pass transcribed text via context
+    ctx.user_data["voice_text"] = text
     await handle_text(update, ctx)
 
 
@@ -281,7 +281,8 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    text = update.message.text or ""
+    # Voice handler stores transcribed text here; fall back to typed message
+    text = ctx.user_data.pop("voice_text", None) or update.message.text or ""
 
     await _typing(update)
 
