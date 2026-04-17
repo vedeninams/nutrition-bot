@@ -727,11 +727,13 @@ Respond with ONLY a JSON object (no prose, no markdown code fences) in this exac
 }}
 
 Decision rules:
+- The "page" field MUST be one of exactly: "profile", "patterns", "goals", "wins", "log".
+  Do NOT include the ".md" extension — write "goals", not "goals.md".
 - If nothing is worth recording, return {{"reasoning": "...", "updates": []}}.
 - Do NOT duplicate observations already in the wiki — scan each page first.
 - SKIP: plain meal logs, corrections (e.g. "two eggs not one"), and general world-knowledge questions (e.g. "why does fermentation reduce calories?").
-- Self-statements ("I'm cutting sugar", "I felt bloated after lunch") usually deserve a bullet in patterns.md or profile.md.
-- Self-questions ("am I low on protein?", "am I over goal?") often reveal concerns or interests — consider a bullet in patterns.md.
+- Self-statements ("I'm cutting sugar", "I felt bloated after lunch") usually deserve a bullet in the patterns or profile page.
+- Self-questions ("am I low on protein?", "am I over goal?") often reveal concerns or interests — consider a bullet in the patterns page.
 - When in doubt whether a question is about the user, LEAN self-question — do not miss important info.
 - Include today's date on new observations, e.g. "(observed {today})".
 - Bullets are one line, natural human language, no internal file references.
@@ -820,6 +822,11 @@ def _apply_wiki_update(user_id: int, upd: dict) -> None:
     Weekly lint (Step 4) is the only pass allowed to rewrite existing content.
     """
     page = upd.get("page", "")
+    # Be defensive: Haiku sometimes emits "goals.md" instead of "goals"
+    # because the instructions reference pages by filename.  Strip any
+    # .md extension so we match our canonical page list.
+    if page.endswith(".md"):
+        page = page[:-3]
     action = upd.get("action", "")
 
     if action == "append" and page in ("patterns", "profile", "goals", "wins"):
