@@ -444,7 +444,7 @@ Classify the user's message into exactly one of these intents:
   question      — asking for advice, information, or analysis (e.g. "how much protein today?", "what should my calorie goal be?", "is my diet balanced?", "what should I eat for dinner?")
   cmd_today     — wants to see TODAY's food log summary (e.g. "show today", "what did I eat today", "today's summary")
   cmd_date_query — wants to see food log for a SPECIFIC past day (e.g. "what did I eat yesterday", "show yesterday", "what did I eat on Tuesday", "my food last Monday", "show me Wednesday", "what was my food on April 7th")
-  cmd_week      — wants weekly food log review (e.g. "how was my week", "weekly summary", "show this week")
+  cmd_week      — wants the FULL weekly review/summary covering everything (e.g. "weekly review", "how was my week overall", "give me my Sunday review", "show me this week"). NOT when the user asks about a specific nutrient, meal, or aspect — those are questions, even when they mention "this week".
   cmd_goal      — wants to CHANGE or SET their calorie goal to a specific number (e.g. "set my goal to 1800", "change my goal to 2200 calories") — NOT asking what it should be
   preference    — sharing a personal preference, restriction, or fact about themselves to be remembered (e.g. "I don't eat fish", "I'm vegetarian", "I'm allergic to nuts", "remember I go to the gym 3x a week", "I weigh 67kg", "my height is 165cm")
 
@@ -456,6 +456,11 @@ IMPORTANT:
 - correction is ONLY when changing a specific logged food item
 - ANY mention of a specific past day when asking about food/eating → cmd_date_query (NOT cmd_today)
   Examples: "yesterday", "Tuesday", "last Monday", "April 7th" → cmd_date_query
+- Specific-topic questions that happen to mention "this week" are STILL questions, not cmd_week:
+    "how's my protein this week?" → question
+    "am I hitting my calorie goal this week?" → question
+    "did I eat enough vegetables this week?" → question
+  cmd_week is only for "give me the full weekly review" style requests.
 
 Reply with ONLY the intent word, nothing else. No explanation, no punctuation."""
 

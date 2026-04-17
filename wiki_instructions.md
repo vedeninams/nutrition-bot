@@ -15,10 +15,21 @@ Each user has their own wiki at `wiki/user_<id>/`, containing five markdown page
 ## The five pages
 
 ### profile.md — Who the user is
-Durable personal facts that stay true over months. Dietary restrictions, allergies, medical notes, structural food preferences (e.g. vegetarian, lactose-intolerant), life context relevant to eating (e.g. shift worker, has a toddler, lots of travel). **No numeric targets here** — those belong in goals.md.
+Durable identity facts that are almost never changing. Dietary restrictions ("vegetarian"), allergies ("allergic to nuts"), medical notes, structural lifestyle facts (shift worker, has a toddler, lots of travel). Things you'd put on a medical intake form.
+
+**DO NOT put active intentions here.** If the user is trying to do something — even something as simple as "eat less sweets" — that belongs in goals.md, not profile.md.
 
 ### goals.md — What they're working toward
-Current calorie target, macro targets, weight target, current strategy, progress notes. All numbers and targets live here. Should reflect the current state, not every past goal.
+Anything the user is actively trying to do, numeric or not. Examples:
+  - "target 1800 kcal/day"
+  - "trying to lose 5 kg"
+  - "cutting sugar for the next month"
+  - "wants to eat less sweets"
+  - "add more protein at breakfast"
+
+Current strategies, progress notes, and target numbers all live here. Should reflect the current state, not every past goal.
+
+**Quick rule**: ask yourself "is this who they ARE (→ profile) or what they're trying to DO (→ goals)?". "I'm vegetarian" = ARE. "I'm trying to eat less meat" = DO.
 
 ### patterns.md — How they actually eat
 Observed eating behaviors and recurring themes. Each bullet includes observation metadata: date first noticed, and observation count if seen multiple times.
