@@ -6,6 +6,9 @@
 *.db
 *.sqlite
 
+# Per-user wiki (personal long-term memory — stays on the server, never pushed)
+wiki/
+
 # Python
 __pycache__/
 *.py[cod]

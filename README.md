@@ -15,14 +15,31 @@ A personal Telegram nutritionist. Send photos of food or nutrition labels and it
 
 ```
 nutrition-bot/
-├── telegram_bot.py   ← Entry point. Routes messages.
-├── analyzer.py       ← Claude vision: food/label/text → nutrition data
-├── advisor.py        ← Smart replies, summaries, weekly review
-├── database.py       ← SQLite: all data storage
-├── .env.example      ← Template for secrets
+├── telegram_bot.py        ← Entry point. Routes messages.
+├── analyzer.py            ← Claude vision: food/label/text → nutrition data
+├── advisor.py             ← Smart replies, summaries, weekly review
+├── database.py            ← SQLite: all data storage
+├── wiki.py                ← Per-user long-term memory (markdown wiki)
+├── wiki_instructions.md   ← Schema/rulebook for the LLM wiki maintainer
+├── wiki_templates/        ← Template pages copied when a user first joins
+├── .env.example           ← Template for secrets
 ├── requirements.txt
 └── README.md
 ```
+
+## Memory architecture
+
+The bot has two layers of memory:
+
+**Short-term memory** — the full conversation from today gets passed to the model on every reply, so the bot can follow natural dialogue ("Yes" after a question still makes sense) and resolve ambiguous messages in context (e.g. "there are two eggs" shortly after a photo is correctly treated as a correction, not a new log).
+
+**Long-term memory (the wiki)** — each user has a small folder of markdown pages (`wiki/user_<id>/profile.md`, `goals.md`, `patterns.md`, `wins.md`, `log.md`) that the LLM incrementally maintains. Instead of re-deriving patterns from raw data every time, observations get *synthesized* into the wiki as they happen. Queries (questions, summaries, Sunday reviews) read from the synthesized wiki rather than raw history. Once a week the bot "lints" the wiki — consolidates redundancy, flags contradictions, updates progress.
+
+This memory architecture is directly inspired by Andrej Karpathy's essay [**"LLM Wiki"**](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f). Karpathy's key argument: most LLM applications use raw retrieval (RAG), which means the LLM rediscovers knowledge from scratch on every question. A better pattern is an LLM-maintained persistent wiki — a compounding artifact where cross-references, synthesis, and reflections build up over time. This project is an experiment in applying that pattern to a personal nutrition coach.
+
+The rules the LLM follows to maintain the wiki live in [`wiki_instructions.md`](./wiki_instructions.md).
+
+The per-user wiki folder (`wiki/`) contains personal data and is gitignored — it never leaves the server.
 
 ## Setup
 

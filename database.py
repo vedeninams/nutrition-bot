@@ -135,7 +135,7 @@ def init_db():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def ensure_user(user_id: int):
-    """Create user row if it doesn't exist yet."""
+    """Create user row if it doesn't exist yet. Also initializes their wiki."""
     conn = get_conn()
     with conn:
         conn.execute(
@@ -143,6 +143,11 @@ def ensure_user(user_id: int):
             (user_id,)
         )
     conn.close()
+
+    # Ensure the user's long-term memory wiki folder exists (idempotent).
+    # Import inside function to avoid a circular import at module load time.
+    import wiki
+    wiki.ensure_user_wiki(user_id)
 
 
 def get_user(user_id: int) -> Optional[dict]:
