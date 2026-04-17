@@ -9,6 +9,9 @@
 # Per-user wiki (personal long-term memory — stays on the server, never pushed)
 wiki/
 
+# Wiki ingest debug log — local/server only
+ingest.log
+
 # Python
 __pycache__/
 *.py[cod]

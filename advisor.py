@@ -634,3 +634,233 @@ Reply in the same language the user typically uses."""
 def today_summary(user_id: int) -> str:
     """On-demand summary of today's meals + activity."""
     return day_summary(user_id, date.today().isoformat(), "Today so far")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. Wiki ingest — async, fire-and-forget (Step 2)
+#
+# After a user sends a self-statement ("I'm cutting sugar") or a self-question
+# ("am I low on protein?"), we kick off a background LLM call that decides
+# whether anything is worth filing into the user's markdown wiki.
+#
+# Key properties:
+#   • Non-blocking  — the user's reply is already sent; ingest runs after.
+#   • Safe          — per-user asyncio.Lock prevents concurrent writes.
+#   • Additive only — ingest can only append bullets / add log entries.
+#     Restructuring & dedup happens in the weekly lint pass (Step 4).
+#   • Auditable     — every decision is logged to ./ingest.log so we can see
+#     why a bullet appeared (or why nothing did).
+#   • Cheap         — uses Haiku (~10× cheaper than Sonnet).  Narrow task.
+# ─────────────────────────────────────────────────────────────────────────────
+
+import asyncio as _asyncio
+import logging as _logging
+from pathlib import Path as _Path
+
+import wiki
+
+# Lazy-initialized async Anthropic client (parallel to the sync `client` above).
+_async_client: Optional[anthropic.AsyncAnthropic] = None
+
+def _get_async_client() -> anthropic.AsyncAnthropic:
+    global _async_client
+    if _async_client is None:
+        _async_client = anthropic.AsyncAnthropic()
+    return _async_client
+
+
+# Dedicated file logger for ingest decisions — separate from the main bot log
+# so we can tail `ingest.log` and inspect exactly what Haiku chose to record.
+_ingest_logger = _logging.getLogger("wiki_ingest")
+if not _ingest_logger.handlers:
+    _ingest_logger.setLevel(_logging.INFO)
+    _h = _logging.FileHandler(_Path(__file__).parent / "ingest.log", encoding="utf-8")
+    _h.setFormatter(_logging.Formatter("%(asctime)s %(message)s"))
+    _ingest_logger.addHandler(_h)
+    _ingest_logger.propagate = False   # don't also spam the main bot log
+
+# Read the rulebook once at import — this is what the LLM must follow.
+_WIKI_RULES = (_Path(__file__).parent / "wiki_instructions.md").read_text(encoding="utf-8")
+
+# asyncio.create_task only keeps a weak reference to the task, so without
+# this set the GC could kill an in-flight ingest.  Callback removes the task
+# once it finishes so the set doesn't grow forever.
+_background_tasks: set = set()
+
+
+_INGEST_PROMPT_TEMPLATE = """You are the wiki maintainer for a personal nutrition coach.
+
+Your job: decide what (if anything) to add to the user's wiki based on ONE recent interaction.
+
+---
+
+# Wiki rules (the schema you must follow)
+
+{rules}
+
+---
+
+# User's current wiki
+
+{wiki_state}
+
+---
+
+# Recent interaction
+
+Interaction type: {interaction_type}
+User said: {user_message}
+Bot replied: {bot_reply}
+
+---
+
+# Your output
+
+Respond with ONLY a JSON object (no prose, no markdown code fences) in this exact shape:
+
+{{
+  "reasoning": "one sentence explaining your decision",
+  "updates": [
+    {{"page": "patterns|profile|goals|wins", "action": "append", "content": "- bullet text"}},
+    {{"page": "log", "action": "log_entry", "summary": "brief summary", "details": "optional"}}
+  ]
+}}
+
+Decision rules:
+- If nothing is worth recording, return {{"reasoning": "...", "updates": []}}.
+- Do NOT duplicate observations already in the wiki — scan each page first.
+- SKIP: plain meal logs, corrections (e.g. "two eggs not one"), and general world-knowledge questions (e.g. "why does fermentation reduce calories?").
+- Self-statements ("I'm cutting sugar", "I felt bloated after lunch") usually deserve a bullet in patterns.md or profile.md.
+- Self-questions ("am I low on protein?", "am I over goal?") often reveal concerns or interests — consider a bullet in patterns.md.
+- When in doubt whether a question is about the user, LEAN self-question — do not miss important info.
+- Include today's date on new observations, e.g. "(observed {today})".
+- Bullets are one line, natural human language, no internal file references.
+- Add a log_entry ONLY for genuinely notable events: a pattern observed for the first time, a contradiction flagged, a milestone hit.
+- Respect the ~30-bullet cap per page.  If a page is nearing the cap, prefer not appending unless clearly new.
+"""
+
+
+async def ingest_interaction(
+    user_id: int,
+    interaction_type: str,
+    user_message: str,
+    bot_reply: str = "",
+) -> None:
+    """
+    Decide whether one interaction is wiki-worthy, then apply any updates.
+
+    Fire-and-forget: callers schedule this via asyncio.create_task() and do NOT
+    await.  All errors are caught and logged to ingest.log — never raised —
+    so a bad ingest can't break the user's reply flow.
+    """
+    try:
+        async with wiki.get_lock(user_id):
+            wiki.ensure_user_wiki(user_id)
+            wiki_state = (
+                wiki.read_wiki_for_prompt(user_id)
+                or "_(empty — new user, no pages have content yet)_"
+            )
+
+            prompt = _INGEST_PROMPT_TEMPLATE.format(
+                rules=_WIKI_RULES,
+                wiki_state=wiki_state,
+                interaction_type=interaction_type,
+                user_message=(user_message or "")[:1500],
+                bot_reply=(bot_reply or "(none)")[:1500],
+                today=date.today().isoformat(),
+            )
+
+            aclient = _get_async_client()
+            response = await aclient.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1000,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = response.content[0].text.strip()
+
+            # Strip code fences if Haiku added them despite instructions
+            if raw.startswith("```"):
+                raw = raw.strip("`")
+                if raw.lower().startswith("json"):
+                    raw = raw[4:]
+                raw = raw.strip()
+
+            try:
+                decision = json.loads(raw)
+            except json.JSONDecodeError as e:
+                _ingest_logger.error(
+                    f"user={user_id} JSON_PARSE_FAIL raw={raw[:400]!r} err={e}"
+                )
+                return
+
+            updates = decision.get("updates") or []
+            reasoning = decision.get("reasoning", "")
+
+            _ingest_logger.info(
+                f"user={user_id} type={interaction_type} "
+                f"msg={user_message[:120]!r} "
+                f"reason={reasoning!r} n_updates={len(updates)}"
+            )
+
+            for upd in updates:
+                try:
+                    _apply_wiki_update(user_id, upd)
+                    _ingest_logger.info(f"user={user_id} APPLIED {upd}")
+                except Exception as e:
+                    _ingest_logger.error(f"user={user_id} APPLY_FAIL upd={upd} err={e!r}")
+
+    except Exception as e:
+        _ingest_logger.error(f"user={user_id} INGEST_FAIL err={e!r}")
+
+
+def _apply_wiki_update(user_id: int, upd: dict) -> None:
+    """
+    Apply one structured update to the wiki.  Only additive ops are allowed:
+    append a bullet to one of the four editable pages, or add a dated log entry.
+    Weekly lint (Step 4) is the only pass allowed to rewrite existing content.
+    """
+    page = upd.get("page", "")
+    action = upd.get("action", "")
+
+    if action == "append" and page in ("patterns", "profile", "goals", "wins"):
+        content = (upd.get("content") or "").strip()
+        if not content:
+            return
+        # Normalize into a bullet line if Haiku forgot the dash.
+        if not content.startswith(("-", "*")):
+            content = f"- {content}"
+        existing = wiki.read_page(user_id, page).rstrip()
+        new_content = f"{existing}\n{content}\n"
+        wiki.write_page(user_id, page, new_content)
+
+    elif action == "log_entry" and page == "log":
+        summary = (upd.get("summary") or "").strip()
+        details = (upd.get("details") or "").strip()
+        if summary:
+            wiki.append_log(user_id, summary, details)
+
+    else:
+        raise ValueError(f"Unknown update shape: page={page!r} action={action!r}")
+
+
+def schedule_ingest(
+    user_id: int,
+    interaction_type: str,
+    user_message: str,
+    bot_reply: str = "",
+) -> None:
+    """
+    Kick off a background ingest task.  Must be called from inside a running
+    asyncio event loop (i.e. from a bot handler).  Does not await — returns
+    immediately so the user-facing reply is never delayed.
+    """
+    try:
+        loop = _asyncio.get_event_loop()
+    except RuntimeError:
+        _ingest_logger.error("schedule_ingest called outside event loop; skipping")
+        return
+    task = loop.create_task(
+        ingest_interaction(user_id, interaction_type, user_message, bot_reply)
+    )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)

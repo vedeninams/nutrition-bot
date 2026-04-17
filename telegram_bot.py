@@ -391,6 +391,9 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if result.get("understood"):
             db.save_profile(user_id, result["profile"])
             await update.message.reply_text("✅ Got it, I'll remember that.")
+            # Fire-and-forget: also let the wiki maintainer decide if this is
+            # a durable fact (profile.md) or a behavioral pattern (patterns.md).
+            advisor.schedule_ingest(user_id, "preference", text, "Saved to profile.")
         else:
             ask = result.get("ask", "I couldn't quite understand that. Could you rephrase?")
             await update.message.reply_text(f"🤔 {ask}")
@@ -557,6 +560,10 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if intent == "question":
         answer = advisor.answer_question(user_id, text)
         await update.message.reply_text(_safe_reply(answer), parse_mode=ParseMode.MARKDOWN)
+        # Fire-and-forget: let Haiku decide whether this question reveals
+        # something about the user worth filing (usually a self-concern like
+        # "am I low on protein?").  When in doubt it leans self-question.
+        advisor.schedule_ingest(user_id, "question", text, answer)
         return
 
     # ── Log text description ──────────────────────────────────────────────────
