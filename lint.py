@@ -32,6 +32,7 @@ Date-prefix convention (set up in Step 4a.0):
 
 import asyncio
 import logging
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -190,9 +191,22 @@ STRICT rules:
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+_BULLET_LINE_RE = re.compile(r"^\s*[-*+]\s+\S", re.MULTILINE)
+
+
 def _is_empty_page(content: str) -> bool:
-    """True if the page is still the unmodified template placeholder."""
-    return (not content) or (not content.strip()) or ("_(Empty" in content)
+    """
+    True if the page has no real content yet — i.e. no bullet lines.
+
+    We used to test for the substring `_(Empty` (the template placeholder),
+    but that was too loose: once ingest appended a bullet below the
+    placeholder without removing it, the check kept matching and skipped
+    perfectly-non-empty pages.  The presence of any bullet is the reliable
+    signal.
+    """
+    if not content or not content.strip():
+        return True
+    return _BULLET_LINE_RE.search(content) is None
 
 
 def _line_count(content: str) -> int:

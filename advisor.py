@@ -846,7 +846,11 @@ def _apply_wiki_update(user_id: int, upd: dict) -> None:
         if not content:
             return
         content = f"- {content}"
-        existing = wiki.read_page(user_id, page).rstrip()
+        # Strip the template's `_(Empty — ...)_` placeholder if it's still
+        # sitting above real content.  Keeps the HTML <!-- ... --> comments
+        # and the # Heading — only the "nothing here yet" sign comes down.
+        # Self-healing: runs on every append, no-op once the line is gone.
+        existing = wiki.strip_empty_placeholder(wiki.read_page(user_id, page)).rstrip()
         new_content = f"{existing}\n{content}\n"
         wiki.write_page(user_id, page, new_content)
 

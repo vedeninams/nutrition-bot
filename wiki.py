@@ -13,6 +13,7 @@ in advisor.py and will be wired up in later steps.
 
 import asyncio
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -116,6 +117,25 @@ def read_wiki_for_prompt(user_id: int) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 # Write
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Matches the template placeholder: `_(Empty — the bot will populate this…)_`
+# on its own line.  Italic-parenthetical markdown starting with "_(Empty".
+_EMPTY_PLACEHOLDER_RE = re.compile(r"^\s*_\(Empty[^\)]*\)_\s*$\n?", re.MULTILINE)
+
+
+def strip_empty_placeholder(content: str) -> str:
+    """
+    Remove the template's `_(Empty — ...)_` placeholder line from a page's
+    content, if present.  Leaves the `# Heading`, HTML comments, and any
+    existing bullets untouched.
+
+    Called from ingest right before appending the first real bullet, so the
+    "nothing here yet" sign comes down automatically the moment a page gets
+    real content.  Self-healing: runs on every append, no-op once the line
+    is gone.
+    """
+    return _EMPTY_PLACEHOLDER_RE.sub("", content)
+
 
 def write_page(user_id: int, page_name: str, content: str) -> None:
     """

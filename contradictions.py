@@ -333,8 +333,20 @@ def list_open(user_id: int) -> list[dict]:
 # Detection — read wiki, ask Haiku for conflicts
 # ─────────────────────────────────────────────────────────────────────────────
 
+_BULLET_LINE_RE = _re.compile(r"^\s*[-*+]\s+\S", _re.MULTILINE)
+
+
 def _is_empty_page(content: str) -> bool:
-    return (not content) or (not content.strip()) or ("_(Empty" in content)
+    """
+    True if the page has no real content yet — i.e. no bullet lines.
+
+    We used to grep for the `_(Empty` placeholder substring, but that
+    failed once ingest appended real bullets below the placeholder without
+    removing it.  Presence of any bullet = page has content.
+    """
+    if not content or not content.strip():
+        return True
+    return _BULLET_LINE_RE.search(content) is None
 
 
 def _log_tail(user_id: int, n_lines: int = LOG_TAIL_LINES) -> str:
