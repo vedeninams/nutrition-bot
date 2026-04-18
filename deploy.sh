@@ -55,17 +55,21 @@ echo "[2/4] Pushing to GitHub..."
 git -C "$(dirname "$0")" push origin "$BRANCH"
 echo ""
 
-# ── 3. Pull on the server and install dependencies ────────────────────────────
-echo "[3/4] Pulling on server and installing dependencies..."
+# ── 3. Sync the server to match origin and install dependencies ───────────────
+# Using fetch + reset --hard (not git pull) so the server always mirrors
+# GitHub exactly — even if we've rewritten history locally (squash, amend,
+# force-push).  The server has no unique work to protect; it's a pure mirror.
+echo "[3/4] Syncing server to origin/$BRANCH and installing dependencies..."
 ssh "$SERVER" "
     set -e
     cd $REMOTE_DIR
-    git pull origin $BRANCH
+    git fetch origin $BRANCH
+    git reset --hard origin/$BRANCH
     $REMOTE_DIR/venv/bin/pip install -q --upgrade pip
     $REMOTE_DIR/venv/bin/pip install -q -r requirements.txt
     chown -R nutrition:nutrition $REMOTE_DIR
     chmod 600 $REMOTE_DIR/.env 2>/dev/null || true
-    echo 'Pull and install done.'
+    echo 'Sync and install done.'
 "
 echo ""
 
