@@ -9,9 +9,10 @@
 # Per-user wiki (personal long-term memory — stays on the server, never pushed)
 wiki/
 
-# Wiki ingest + lint debug logs — local/server only
+# Wiki ingest + lint + contradiction debug logs — local/server only
 ingest.log
 lint.log
+contradictions.log
 
 # Python
 __pycache__/

@@ -11,6 +11,7 @@ Architecture:
 Run:   python telegram_bot.py
 Cron:  python telegram_bot.py --daily-summary  (08:00 every day)
 Cron:  python telegram_bot.py --weekly-review  (Sunday morning)
+Cron:  python telegram_bot.py --lint-cron      (Saturday 10:05 Europe/Berlin)
 """
 
 import asyncio
@@ -35,6 +36,7 @@ import analyzer
 import advisor
 import wiki
 import lint
+import contradictions
 
 load_dotenv()
 
@@ -394,6 +396,44 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await _typing(update)
 
+    # ── Contradiction pre-route ──────────────────────────────────────────────
+    # If the bot flagged a contradiction in this user's wiki and asked them
+    # about it, every incoming text is first run through a Haiku classifier
+    # to see if they're answering.  If yes → apply resolution and stop.
+    # If unrelated → fall through to the normal intent router below.
+    pending = contradictions.oldest_open(user_id)
+    if pending is not None:
+        try:
+            decision = await contradictions.classify_user_reply(pending, text)
+        except Exception as e:
+            log.warning(f"contradiction classifier failed: {e}")
+            decision = {"action": "unrelated"}
+
+        if decision.get("action") and decision["action"] != "unrelated":
+            try:
+                result = await contradictions.resolve(
+                    user_id,
+                    pending["ts"],
+                    decision["action"],
+                    custom_text=decision.get("custom_text"),
+                    target_page=decision.get("target_page"),
+                )
+            except Exception as e:
+                log.exception(f"contradiction resolve failed: {e}")
+                await update.message.reply_text(
+                    "😕 Couldn't apply that change to my notes — please try again."
+                )
+                return
+
+            if result.get("ok"):
+                await update.message.reply_text(f"✅ {result['summary']}")
+            else:
+                await update.message.reply_text(
+                    f"⚠️ {result.get('summary', 'Could not resolve that.')}"
+                )
+            return
+        # else: user wrote about something unrelated — continue to the router.
+
     intent = analyzer.detect_intent(text)
     log.info(f"user={user_id} intent={intent} text={text[:60]}")
 
@@ -745,6 +785,74 @@ async def run_weekly_review():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Saturday 10:05 Europe/Berlin — weekly tidy + contradiction check
+#
+# Runs one day before the weekly review so the user's memory is clean and any
+# flagged conflicts are surfaced before the review lands.
+#
+# Install on the server (crontab -e) with:
+#     CRON_TZ=Europe/Berlin
+#     5 10 * * 6 /opt/nutrition-bot/venv/bin/python /opt/nutrition-bot/telegram_bot.py --lint-cron
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _format_contradiction_dm(c: dict) -> str:
+    """Natural-language DM prompting the user to resolve an open conflict."""
+    return (
+        "🤔 I spotted something that looks contradictory in my notes about you. "
+        "Could you tell me which is right?\n\n"
+        f"• _{c['page_a']}.md_ says: *{c['line_a']}*\n"
+        f"• _{c['page_b']}.md_ says: *{c['line_b']}*\n\n"
+        f"_{c.get('why', '').strip()}_\n\n"
+        "Just reply in your own words — e.g. “the first one”, “actually 59kg”, "
+        "“keep both”, or “neither”."
+    )
+
+
+async def run_lint_cron():
+    """
+    Weekly job: lint + detect contradictions for every user, DM one prompt per
+    user if there's at least one OPEN contradiction afterwards.
+    """
+    from telegram import Bot
+    from database import get_conn
+
+    bot = Bot(token=BOT_TOKEN)
+    conn = get_conn()
+    users = conn.execute("SELECT user_id FROM users").fetchall()
+    conn.close()
+
+    for row in users:
+        uid = row["user_id"]
+        try:
+            # 1) Tidy first so we're detecting on a clean wiki.
+            await lint.lint_user_wiki(uid)
+        except Exception as e:
+            log.warning(f"lint failed for user {uid}: {e}")
+
+        try:
+            # 2) Detect new contradictions across the cleaned wiki.
+            new_conflicts = await contradictions.detect(uid)
+            if new_conflicts:
+                contradictions.record(uid, new_conflicts)
+        except Exception as e:
+            log.warning(f"contradiction detect failed for user {uid}: {e}")
+
+        try:
+            # 3) DM one prompt per user for the oldest open conflict, if any.
+            pending = contradictions.oldest_open(uid)
+            if pending is not None:
+                await bot.send_message(
+                    chat_id=uid,
+                    text=_format_contradiction_dm(pending),
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+        except Exception as e:
+            log.warning(f"could not DM contradiction prompt to user {uid}: {e}")
+
+    log.info("Weekly lint + contradiction pass done.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -760,6 +868,9 @@ def main():
         return
     if "--weekly-review" in sys.argv:
         asyncio.run(run_weekly_review())
+        return
+    if "--lint-cron" in sys.argv:
+        asyncio.run(run_lint_cron())
         return
 
     # Normal bot run
