@@ -446,15 +446,15 @@ Classify the user's message into exactly one of these intents:
   cmd_date_query — wants to see food log for a SPECIFIC past day (e.g. "what did I eat yesterday", "show yesterday", "what did I eat on Tuesday", "my food last Monday", "show me Wednesday", "what was my food on April 7th")
   cmd_week      — wants the FULL weekly review/summary covering everything (e.g. "weekly review", "how was my week overall", "give me my Sunday review", "show me this week"). NOT when the user asks about a specific nutrient, meal, or aspect — those are questions, even when they mention "this week".
   cmd_goal      — wants to CHANGE or SET their calorie goal to a specific number (e.g. "set my goal to 1800", "change my goal to 2200 calories") — NOT asking what it should be
-  preference    — sharing a personal fact, restriction, or INTENTION about themselves to be remembered. This covers both current-state facts AND forward-looking goals or intentions.
+  remember      — sharing a personal fact, restriction, or INTENTION about themselves to be remembered. This covers both current-state facts AND forward-looking goals or intentions.
                   Current-state examples: "I don't eat fish", "I'm vegetarian", "I'm allergic to nuts", "I weigh 67kg", "my height is 165cm", "I go to the gym 3x a week"
                   Forward-looking examples: "I would like to eat more healthy fats", "I'm trying to cut sugar", "I want to eat less sweets", "my goal is to eat healthier", "I'd like to lose 5kg"
-                  If the message describes who the user is OR what they're trying to do, it's a preference.
+                  If the message describes who the user IS or what they're trying to DO, it's a remember.
 
 IMPORTANT:
 - "what should my goal be?" → question
 - "set my goal to 1800" → cmd_goal (only when setting a specific number)
-- "I don't eat fish", "please remember I hate cilantro", "I'm lactose intolerant" → preference
+- "I don't eat fish", "please remember I hate cilantro", "I'm lactose intolerant" → remember
 - "wait, actually this was breakfast" → question
 - correction is ONLY when changing a specific logged food item
 - ANY mention of a specific past day when asking about food/eating → cmd_date_query (NOT cmd_today)
@@ -464,11 +464,11 @@ IMPORTANT:
     "am I hitting my calorie goal this week?" → question
     "did I eat enough vegetables this week?" → question
   cmd_week is only for "give me the full weekly review" style requests.
-- Forward-looking intention statements are preferences, NOT questions:
-    "I would like to eat more fiber" → preference
-    "I'm trying to cut sugar" → preference
-    "my goal is to eat healthier" → preference
-  Questions ask for information or advice. Statements of intent are preferences.
+- Forward-looking intention statements are remember, NOT question:
+    "I would like to eat more fiber" → remember
+    "I'm trying to cut sugar" → remember
+    "my goal is to eat healthier" → remember
+  Questions ask for information or advice. Statements of intent are remember.
 
 Reply with ONLY the intent word, nothing else. No explanation, no punctuation."""
 
@@ -502,7 +502,7 @@ def detect_intent(text: str) -> str:
             messages=[{"role": "user", "content": text}],
         )
         intent = response.content[0].text.strip().lower()
-        valid = {"log_text", "correction", "question", "cmd_today", "cmd_date_query", "cmd_week", "cmd_goal", "preference"}
+        valid = {"log_text", "correction", "question", "cmd_today", "cmd_date_query", "cmd_week", "cmd_goal", "remember"}
         return intent if intent in valid else "log_text"
     except Exception:
         t = text.lower()

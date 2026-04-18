@@ -384,8 +384,8 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
         return
 
-    # ── Preference / personal info to remember ───────────────────────────────
-    if intent == "preference":
+    # ── Remember: personal fact or intention to store ────────────────────────
+    if intent == "remember":
         current_profile = db.get_profile(user_id)
         result = analyzer.update_profile(current_profile, text)
         if result.get("understood"):
@@ -393,7 +393,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("✅ Got it, I'll remember that.")
             # Fire-and-forget: also let the wiki maintainer decide if this is
             # a durable fact (profile.md) or a behavioral pattern (patterns.md).
-            advisor.schedule_ingest(user_id, "preference", text, "Saved to profile.")
+            advisor.schedule_ingest(user_id, "remember", text, "Saved to profile.")
         else:
             ask = result.get("ask", "I couldn't quite understand that. Could you rephrase?")
             await update.message.reply_text(f"🤔 {ask}")
