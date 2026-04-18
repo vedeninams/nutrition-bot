@@ -95,14 +95,15 @@ _PAGE_GUIDANCE = {
         "restrictions, medical notes, structural preferences).\n"
         "Operations on this page:\n"
         "  - DEDUP: merge two lines that mean the same thing.  Keep the "
-        "fuller wording; use the LATER of the two date prefixes.\n"
+        "fuller wording; use the LATER of the two date prefixes (or no "
+        "prefix if both are pre-convention).  Dedup is ALLOWED between two "
+        "pre-convention lines — merging is lossless.\n"
         "  - SUPERSEDE: if two lines describe the same fact with different "
         "values (e.g. '[2026-01-10] Current weight: 67kg' and "
         "'[2026-04-15] Current weight: 60kg'), KEEP ONLY the line with the "
         "LATER date prefix — it's the current truth.\n"
-        "  - Lines without a [YYYY-MM-DD] prefix are pre-convention "
-        "(migrated from older storage).  Keep them unless they are "
-        "explicitly contradicted by a dated line.\n"
+        "    Supersede REQUIRES at least one dated line; do NOT supersede "
+        "between two pre-convention lines (no way to tell which is newer).\n"
         "Time-bounded entries are rare here — usually keep."
     ),
     "goals": (
@@ -110,7 +111,8 @@ _PAGE_GUIDANCE = {
         "to achieve right now).\n"
         "Operations on this page:\n"
         "  - DEDUP: 'reduce sweets' and 'cut sugar' are the same goal — "
-        "merge, keep the LATER date prefix.\n"
+        "merge, keep the LATER date prefix (or no prefix if both are "
+        "pre-convention).  Dedup is ALLOWED between two pre-convention lines.\n"
         "  - SUPERSEDE: if the target itself changed (e.g. "
         "'[2026-02-01] goal weight: 62kg' then "
         "'[2026-04-10] goal weight: 60kg'), KEEP ONLY the line with the "
@@ -136,7 +138,8 @@ _PAGE_GUIDANCE = {
         "(e.g. 'skips breakfast on busy days').\n"
         "Operations on this page:\n"
         "  - DEDUP: merge near-identical patterns.  Keep the LATER date "
-        "prefix and the fuller wording.\n"
+        "prefix (or no prefix if both are pre-convention) and the fuller "
+        "wording.  Dedup is ALLOWED between two pre-convention lines.\n"
         "  - SUPERSEDE: if a pattern has been explicitly contradicted by a "
         "later-dated entry, drop the older one.\n"
         "  - Do NOT drop a pattern just because it hasn't been observed "
@@ -359,6 +362,7 @@ async def lint_user_wiki(user_id: int) -> dict:
                 result[page_name] = {
                     "before": before_lines,
                     "after": before_lines,
+                    "rewritten": False,
                 }
                 _log.info(f"user={user_id} page={page_name} no change ({before_lines} lines)")
                 continue
@@ -371,10 +375,11 @@ async def lint_user_wiki(user_id: int) -> dict:
             result[page_name] = {
                 "before": before_lines,
                 "after": after_lines,
+                "rewritten": True,
             }
             _log.info(
                 f"user={user_id} page={page_name} "
-                f"lines {before_lines}→{after_lines}"
+                f"lines {before_lines}→{after_lines} (rewritten)"
             )
 
         # After all pages done, append the summary to log.md (still holding

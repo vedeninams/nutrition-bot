@@ -218,25 +218,20 @@ async def cmd_lint(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Build a per-page summary.
-    lines = ["✅ Done. Here's what changed:"]
+    # Build a per-page summary.  Collapse to two outcomes the user cares
+    # about: tidied or nothing to tidy.  Line-count details live in log.md.
+    lines = ["✅ Done."]
     any_change = False
     for page, title in _LINT_PAGE_TITLES.items():
         info = result.get(page, {})
-        if info.get("skipped"):
-            lines.append(f"{title}: skipped (empty)")
-            continue
-        before = info.get("before", 0)
-        after  = info.get("after", 0)
-        if before == after:
-            lines.append(f"{title}: no change ({before} lines)")
-        else:
+        if info.get("rewritten"):
             any_change = True
-            delta = before - after
-            lines.append(f"{title}: {before} → {after} lines (−{delta})")
+            lines.append(f"{title} — tidied")
+        else:
+            lines.append(f"{title} — nothing to tidy")
 
     if not any_change:
-        lines.append("\nNothing needed tidying today — your notes are clean.")
+        lines.append("\nYour notes are already clean.")
     else:
         lines.append(
             "\n_Backups of the previous versions are saved in case I got "
