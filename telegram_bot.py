@@ -33,6 +33,7 @@ from telegram.constants import ParseMode
 import database as db
 import analyzer
 import advisor
+import wiki
 
 load_dotenv()
 
@@ -119,18 +120,56 @@ async def cmd_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    db.ensure_user(user_id)  # triggers one-time SQL→wiki migration if needed
     user = db.get_user(user_id) or {}
-    profile = db.get_profile(user_id)
-
     goal = user.get("daily_kcal", 2000)
-    header = f"📋 *What I know about you:*\n\n🎯 Daily calorie goal: {goal} kcal\n"
 
-    if profile and profile.strip():
-        body = f"\n*Profile & preferences:*\n{profile}"
-    else:
-        body = "\nNo preferences saved yet. Just tell me things like \"I don't eat meat\" or \"I weigh 67kg\" and I'll remember."
+    header = f"📋 What I know about you:\n\n🎯 Daily calorie goal: {goal} kcal"
 
-    await update.message.reply_text(header + body, parse_mode=ParseMode.MARKDOWN)
+    # Pretty-print each populated wiki page for the user.
+    section_titles = {
+        "profile": "👤 Profile",
+        "goals":   "🎯 Goals",
+        "patterns": "📊 Patterns",
+        "wins":    "🏆 Wins",
+    }
+    pages = wiki.read_all_pages(user_id)
+
+    parts = [header]
+    any_content = False
+    for key, title in section_titles.items():
+        content = _clean_wiki_for_display(pages.get(key, ""))
+        if not content:
+            continue
+        parts.append(f"\n{title}\n{content}")
+        any_content = True
+
+    if not any_content:
+        parts.append(
+            "\nI haven't learned much about you yet. Just tell me things like "
+            "\"I don't eat meat\" or \"I'm trying to lose 5kg\" and I'll remember."
+        )
+
+    # No parse_mode — wiki content contains `#`/`##` markdown that Telegram doesn't understand.
+    await update.message.reply_text("\n".join(parts))
+
+
+def _clean_wiki_for_display(content: str) -> str:
+    """Strip template scaffolding (HTML comments, H1 heading, empty placeholder)
+    from a wiki page so it reads cleanly in Telegram."""
+    import re
+    if not content:
+        return ""
+    # Drop HTML comment blocks (migration marker, template instructions)
+    content = re.sub(r"<!--[\s\S]*?-->", "", content)
+    # Drop the top-level "# Profile" style heading
+    content = re.sub(r"^#\s+\S+.*\n", "", content.strip(), count=1)
+    # Treat empty-placeholder as no content
+    if "_(Empty" in content:
+        return ""
+    # Collapse extra blank lines
+    content = re.sub(r"\n{3,}", "\n\n", content)
+    return content.strip()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -306,7 +345,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         user_weight = weight or db.get_latest_weight(user_id) or 70.0
         existing = db.get_daily_stats(user_id, date_str) or {}
         workouts = existing.get("workouts") or []
-        profile = db.get_profile(user_id)
+        profile = wiki.read_wiki_for_prompt(user_id)
 
         burn_data = analyzer.estimate_activity_calories(steps, workouts, user_weight, profile)
         kcal_burned = burn_data.get("total_kcal", 0)
@@ -350,7 +389,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         user_weight = db.get_latest_weight(user_id) or 70.0
         existing = db.get_daily_stats(user_id, _date.today().isoformat()) or {}
         steps = existing.get("steps")
-        profile = db.get_profile(user_id)
+        profile = wiki.read_wiki_for_prompt(user_id)
 
         burn_data = analyzer.estimate_activity_calories(steps, workouts, user_weight, profile)
         kcal_burned = burn_data.get("total_kcal", 0)
@@ -386,17 +425,11 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # ── Remember: personal fact or intention to store ────────────────────────
     if intent == "remember":
-        current_profile = db.get_profile(user_id)
-        result = analyzer.update_profile(current_profile, text)
-        if result.get("understood"):
-            db.save_profile(user_id, result["profile"])
-            await update.message.reply_text("✅ Got it, I'll remember that.")
-            # Fire-and-forget: also let the wiki maintainer decide if this is
-            # a durable fact (profile.md) or a behavioral pattern (patterns.md).
-            advisor.schedule_ingest(user_id, "remember", text, "Saved to profile.")
-        else:
-            ask = result.get("ask", "I couldn't quite understand that. Could you rephrase?")
-            await update.message.reply_text(f"🤔 {ask}")
+        # The wiki is now the single source of truth for long-term memory.
+        # Fire-and-forget ingest decides whether this is a durable identity
+        # fact (profile.md) or an active intention (goals.md) and writes there.
+        await update.message.reply_text("✅ Got it, I'll remember that.")
+        advisor.schedule_ingest(user_id, "remember", text, "Saved.")
         return
 
     # ── Natural language: today summary ──────────────────────────────────────

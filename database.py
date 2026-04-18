@@ -142,12 +142,21 @@ def ensure_user(user_id: int):
             "INSERT OR IGNORE INTO users (user_id) VALUES (?)",
             (user_id,)
         )
+
+    # Read legacy SQL profile text (if any) so the wiki can absorb it on first run.
+    row = conn.execute(
+        "SELECT profile FROM user_profile WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    sql_profile = row["profile"] if row else ""
     conn.close()
 
     # Ensure the user's long-term memory wiki folder exists (idempotent).
     # Import inside function to avoid a circular import at module load time.
     import wiki
     wiki.ensure_user_wiki(user_id)
+    # One-time migration of legacy SQL profile → wiki profile.md.
+    # Marker inside profile.md makes this a no-op after the first call.
+    wiki.migrate_sql_profile_if_needed(user_id, sql_profile)
 
 
 def get_user(user_id: int) -> Optional[dict]:

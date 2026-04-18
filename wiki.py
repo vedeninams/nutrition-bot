@@ -147,3 +147,44 @@ def append_log(user_id: int, summary: str, details: str = "") -> None:
     log_path = user_wiki_dir(user_id) / "log.md"
     existing = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
     log_path.write_text(existing + entry, encoding="utf-8")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# One-time migration of legacy SQL profile → profile.md
+# ─────────────────────────────────────────────────────────────────────────────
+
+_MIGRATION_MARKER = "<!-- migrated_from_sql_profile"
+
+
+def migrate_sql_profile_if_needed(user_id: int, sql_profile: str) -> bool:
+    """
+    Copy a legacy SQL user_profile.profile text into this user's profile.md.
+    Idempotent — stamps a marker into profile.md so the migration runs at most
+    once per user. Safe to call on every ensure_user call.
+
+    Returns True if content was migrated, False if already stamped or empty.
+    """
+    ensure_user_wiki(user_id)
+    profile_path = user_wiki_dir(user_id) / "profile.md"
+    current = profile_path.read_text(encoding="utf-8") if profile_path.exists() else ""
+
+    # Already migrated — nothing to do
+    if _MIGRATION_MARKER in current:
+        return False
+
+    date_str = datetime.now().strftime("%Y-%m-%d")
+
+    # Even with nothing to migrate, stamp the marker so we don't re-check
+    # the SQL table on every ensure_user call forever.
+    if not sql_profile or not sql_profile.strip():
+        stamped = f"{_MIGRATION_MARKER} on {date_str}: empty -->\n{current}"
+        profile_path.write_text(stamped, encoding="utf-8")
+        return False
+
+    migrated = (
+        f"{_MIGRATION_MARKER} on {date_str} -->\n"
+        f"# Profile\n\n"
+        f"{sql_profile.strip()}\n"
+    )
+    profile_path.write_text(migrated, encoding="utf-8")
+    return True

@@ -16,6 +16,7 @@ from typing import Optional
 from dotenv import load_dotenv
 
 import database as db
+import wiki
 
 load_dotenv()   # must happen before Anthropic() reads the env
 client = anthropic.Anthropic()
@@ -371,11 +372,11 @@ def weekly_review(user_id: int) -> str:
         for d in month_data
     )
 
-    profile = db.get_profile_for_prompt(user_id)
+    profile = wiki.read_wiki_for_prompt(user_id)
     prompt = f"""You are a supportive personal nutritionist sending a detailed Sunday weekly review to your client.
 
 User's daily calorie goal: {goal} kcal
-{f"User profile: {profile}" if profile else ""}
+{f"What I know about this user (long-term memory):{chr(10)}{profile}" if profile else ""}
 
 Data for the past {len(month_data)} days (all available history):
 {month_summary}
@@ -415,14 +416,14 @@ def answer_question(user_id: int, question: str) -> str:
     today_meals = db.get_today_meals(user_id)
     week = db.get_week_totals(user_id)
 
-    profile = db.get_profile_for_prompt(user_id)
+    profile = wiki.read_wiki_for_prompt(user_id)
     context = f"""You are a friendly, knowledgeable personal nutritionist.
 You have access to the user's food tracking data below. Use it when relevant.
 
 User's current daily calorie goal: {goal} kcal
 Today's logged meals: {json.dumps(today_meals, default=str)}
 This week's daily totals: {json.dumps(week, default=str)}
-{f"{chr(10)}{profile}" if profile else ""}
+{f"{chr(10)}What I know about this user (long-term memory):{chr(10)}{profile}" if profile else ""}
 Your role:
 - Answer data questions using the actual numbers above ("you had 30g protein today")
 - Answer general nutrition questions with real expert advice (calorie needs, macros, weight loss, meal suggestions, etc.)
@@ -576,7 +577,7 @@ def evening_summary(user_id: int) -> str:
     # Gather data for the AI analysis
     user = db.get_user(user_id) or {}
     goal = user.get("daily_kcal", 2000)
-    profile = db.get_profile_for_prompt(user_id)
+    profile = wiki.read_wiki_for_prompt(user_id)
     today_totals = db.get_today_totals(user_id)
     week_data = db.get_week_totals(user_id)  # last 7 days daily totals
     activity = db.get_daily_stats(user_id, date.today().isoformat())
@@ -606,7 +607,7 @@ Today's summary:
 Last 5 days:
 {past_lines}
 
-{f"User profile: {profile}" if profile else ""}
+{f"What I know about this user (long-term memory):{chr(10)}{profile}" if profile else ""}
 
 Write a SHORT evening message in exactly 3 separate paragraphs (one sentence each, separated by a blank line):
 
@@ -653,7 +654,7 @@ import asyncio as _asyncio
 import logging as _logging
 from pathlib import Path as _Path
 
-import wiki
+# (`wiki` is already imported at the top of this module.)
 
 # Lazy-initialized async Anthropic client (parallel to the sync `client` above).
 _async_client: Optional[anthropic.AsyncAnthropic] = None
