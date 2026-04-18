@@ -199,10 +199,16 @@ _LINT_PAGE_TITLES = {
 
 async def cmd_lint(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """
-    Run a foreground lint pass over the caller's wiki and report what changed.
+    On-demand version of the Saturday cron.  Runs in three phases:
 
-    Backups are written to wiki/user_<id>/.backups/ before any page is
-    overwritten (last 3 kept per page), so this is safe to run ad-hoc.
+      1. Tidy each page (dedup / supersede / drop stale).  Backups are
+         written to wiki/user_<id>/.backups/ before any page is overwritten
+         (last 3 kept per page), so this is safe to run ad-hoc.
+      2. Detect new contradictions across the cleaned wiki.
+      3. If any OPEN contradictions exist (new or previously unanswered),
+         DM the user about the oldest one — same phrasing the weekly cron
+         uses.  The user's next text reply is caught by the pre-route
+         intercept in handle_text and resolved via the Haiku classifier.
     """
     user_id = update.effective_user.id
     db.ensure_user(user_id)  # make sure their wiki exists
@@ -211,6 +217,7 @@ async def cmd_lint(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "🧹 Tidying up my notes about you… this takes a few seconds."
     )
 
+    # ── 1. Tidy ──────────────────────────────────────────────────────────────
     try:
         result = await lint.lint_user_wiki(user_id)
     except Exception as e:
@@ -241,6 +248,26 @@ async def cmd_lint(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+    # ── 2. Detect + record new contradictions ────────────────────────────────
+    try:
+        new_conflicts = await contradictions.detect(user_id)
+        if new_conflicts:
+            contradictions.record(user_id, new_conflicts)
+    except Exception as e:
+        # Don't block /lint on detection errors — user already got their tidy reply.
+        log.warning(f"contradiction detect failed in /lint for user={user_id}: {e}")
+
+    # ── 3. DM about the oldest OPEN contradiction, if any ────────────────────
+    try:
+        pending = contradictions.oldest_open(user_id)
+        if pending is not None:
+            await update.message.reply_text(
+                _format_contradiction_dm(pending),
+                parse_mode=ParseMode.MARKDOWN,
+            )
+    except Exception as e:
+        log.warning(f"contradiction DM failed in /lint for user={user_id}: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -795,16 +822,35 @@ async def run_weekly_review():
 #     5 10 * * 6 /opt/nutrition-bot/venv/bin/python /opt/nutrition-bot/telegram_bot.py --lint-cron
 # ─────────────────────────────────────────────────────────────────────────────
 
+_REPLY_HINT = (
+    "_Just reply in your own words — e.g. “the first one”, “actually yes”, "
+    "“keep both”, or “neither”._"
+)
+
+# Strips a leading `[YYYY-MM-DD] ` prefix so fallback DMs don't expose raw dates.
+_DATE_PREFIX_RE = __import__("re").compile(r"^\s*\[\d{4}-\d{2}-\d{2}\]\s*")
+
+
 def _format_contradiction_dm(c: dict) -> str:
-    """Natural-language DM prompting the user to resolve an open conflict."""
+    """
+    Friendly DM text for an OPEN contradiction.  Primary path: use the
+    `ask` Haiku produced at detection time (short, conversational, no
+    file names, natural dates).  Fallback path for legacy sections that
+    don't carry an `ask` yet: strip file names and date prefixes from
+    A/B and show them plainly.
+    """
+    ask = (c.get("ask") or "").strip()
+    if ask:
+        return f"🤔 {ask}\n\n{_REPLY_HINT}"
+
+    # Fallback — older contradictions.md entries from before the `ask` field.
+    a_clean = _DATE_PREFIX_RE.sub("", c.get("line_a", "")).strip()
+    b_clean = _DATE_PREFIX_RE.sub("", c.get("line_b", "")).strip()
     return (
-        "🤔 I spotted something that looks contradictory in my notes about you. "
-        "Could you tell me which is right?\n\n"
-        f"• _{c['page_a']}.md_ says: *{c['line_a']}*\n"
-        f"• _{c['page_b']}.md_ says: *{c['line_b']}*\n\n"
-        f"_{c.get('why', '').strip()}_\n\n"
-        "Just reply in your own words — e.g. “the first one”, “actually 59kg”, "
-        "“keep both”, or “neither”."
+        "🤔 I spotted something that doesn't quite line up in my notes about you:\n\n"
+        f"• *{a_clean}*\n"
+        f"• *{b_clean}*\n\n"
+        f"{_REPLY_HINT}"
     )
 
 

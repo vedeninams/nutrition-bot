@@ -153,7 +153,8 @@ Return JSON in exactly this shape (no markdown, no code fences, no preamble):
       "line_a": "<exact text of line A, without the leading '- '>",
       "page_b": "<page name where line B lives>",
       "line_b": "<exact text of line B, without the leading '- '>",
-      "why": "<one short sentence explaining the conflict>"
+      "why": "<one short sentence explaining the conflict>",
+      "ask": "<friendly one-line question to the user>"
     }}
   ]
 }}
@@ -162,6 +163,25 @@ Rules for the JSON:
 - page_a and page_b must each be one of: profile, goals, patterns, wins, log.
 - line_a and line_b must be COPIED VERBATIM from the wiki above — preserve
   any `[YYYY-MM-DD]` date prefix, preserve punctuation.  Do NOT summarise.
+- `why` is internal bookkeeping — keep it short and factual.
+- `ask` is what the user will actually see.  Write it as a short, friendly,
+  conversational question — the voice of a nutrition coach who noticed
+  something inconsistent and wants clarification.  Hard rules for `ask`:
+    • ONE line, 1–2 sentences max.
+    • NEVER mention page or file names ("profile.md", "goals", "log").
+    • NEVER show raw `[YYYY-MM-DD]` timestamps.  Convert dates to
+      natural language like "on 18 April" (or "yesterday"/"today" when
+      today is {today} and the date fits).  Drop the year — user knows it.
+    • Paraphrase the statements in everyday language; don't quote the
+      raw bullet text if it's terse or internal-looking.
+    • End with a question that invites any answer (not just A/B), e.g.
+      "which is right?" or "what's true today?".
+    • Example of the RIGHT tone:
+        "Hey — you said on 18 April you don't eat olive oil, but on
+         19 April it sounded like you do.  Which one's right?"
+    • Example of the WRONG tone (too technical, don't do this):
+        "profile.md says '[2026-04-18] Does not eat olive oil' and
+         log.md says 'User stated i eat olive oil on 2026-04-19'..."
 - If you find no contradictions, return exactly: {{"contradictions": []}}."""
 
 
@@ -283,9 +303,10 @@ def _parse_sections(content: str) -> list[dict]:
             "page_b": "",
             "line_b": "",
             "why": "",
+            "ask": "",
         }
 
-        # Pull the A / B / Why bullets out of the block.
+        # Pull the A / B / Why / Ask bullets out of the block.
         for key in ("A", "B"):
             bm = _re.search(
                 rf"^- \*\*{key}\*\*\s*\(([^)]+)\):\s*`(.+?)`\s*$",
@@ -299,6 +320,10 @@ def _parse_sections(content: str) -> list[dict]:
         wm = _re.search(r"^- \*\*Why\*\*:\s*(.+?)$", block, _re.MULTILINE)
         if wm:
             sec["why"] = wm.group(1).strip()
+
+        am = _re.search(r"^- \*\*Ask\*\*:\s*(.+?)$", block, _re.MULTILINE)
+        if am:
+            sec["ask"] = am.group(1).strip()
 
         sections.append(sec)
     return sections
@@ -421,6 +446,7 @@ async def detect(user_id: int) -> list[dict]:
             pb = str(c["page_b"]).strip()
             lb = str(c["line_b"]).strip()
             why = str(c.get("why", "")).strip()
+            ask = str(c.get("ask", "")).strip()
         except (KeyError, TypeError):
             continue
         if pa not in CONTEXT_PAGES or pb not in CONTEXT_PAGES:
@@ -430,7 +456,7 @@ async def detect(user_id: int) -> list[dict]:
         cleaned.append({
             "page_a": pa, "line_a": la,
             "page_b": pb, "line_b": lb,
-            "why": why,
+            "why": why, "ask": ask,
         })
 
     _log.info(f"user={user_id} detect found {len(cleaned)} contradiction(s)")
@@ -455,12 +481,21 @@ def _same_pair(a: dict, b: dict) -> bool:
 
 
 def _format_open_section(ts: str, c: dict) -> str:
-    return (
-        f"\n## [{ts}] OPEN\n"
-        f"- **A** ({c['page_a']}): `{c['line_a']}`\n"
-        f"- **B** ({c['page_b']}): `{c['line_b']}`\n"
-        f"- **Why**: {c.get('why', '').strip() or '(no reason given)'}\n"
-    )
+    """
+    Serialize one OPEN contradiction into a contradictions.md section.
+    `Ask` is the user-facing question Haiku wrote at detection time — the
+    DM code reads it back verbatim so the phrasing survives a bot restart.
+    """
+    parts = [
+        f"\n## [{ts}] OPEN\n",
+        f"- **A** ({c['page_a']}): `{c['line_a']}`\n",
+        f"- **B** ({c['page_b']}): `{c['line_b']}`\n",
+        f"- **Why**: {c.get('why', '').strip() or '(no reason given)'}\n",
+    ]
+    ask = (c.get("ask") or "").strip()
+    if ask:
+        parts.append(f"- **Ask**: {ask}\n")
+    return "".join(parts)
 
 
 def record(user_id: int, conflicts: list[dict]) -> list[str]:
