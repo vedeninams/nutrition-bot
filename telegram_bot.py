@@ -128,21 +128,34 @@ async def cmd_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = db.get_user(user_id) or {}
     goal = user.get("daily_kcal", 2000)
 
-    header = f"📋 What I know about you:\n\n🎯 Daily calorie goal: {goal} kcal"
+    header = "📋 What I know about you:"
 
     # Pretty-print each populated wiki page for the user.
+    # Order matters: profile first (who you are), then goals (with calorie
+    # goal injected as the first bullet so everything goal-related lives
+    # together), then patterns, then wins.
     section_titles = {
-        "profile": "👤 Profile",
-        "goals":   "🎯 Goals",
+        "profile":  "👤 Profile",
+        "goals":    "🎯 Goals",
         "patterns": "📊 Patterns",
-        "wins":    "🏆 Wins",
+        "wins":     "🏆 Wins",
     }
     pages = wiki.read_all_pages(user_id)
+    goal_line = f"- Daily calorie goal: {goal} kcal"
 
     parts = [header]
     any_content = False
     for key, title in section_titles.items():
         content = _clean_wiki_for_display(pages.get(key, ""))
+
+        # Goals: always render, with the calorie goal as the first bullet.
+        # Other pages: skip if empty.
+        if key == "goals":
+            body = goal_line if not content else f"{goal_line}\n{content}"
+            parts.append(f"\n{title}\n{body}")
+            any_content = True
+            continue
+
         if not content:
             continue
         parts.append(f"\n{title}\n{content}")
@@ -159,18 +172,28 @@ async def cmd_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 def _clean_wiki_for_display(content: str) -> str:
-    """Strip template scaffolding (HTML comments, H1 heading, empty placeholder)
-    from a wiki page so it reads cleanly in Telegram."""
+    """Strip template scaffolding (HTML comments, markdown headings, horizontal
+    rules, empty placeholder, ingest date prefix) from a wiki page so it reads
+    cleanly in Telegram.
+
+    Intentionally strips ALL `# Heading` lines (not just the first) — the bot
+    adds its own section title (like "🎯 Goals") before the content, so the
+    in-file `# Goals` heading would always duplicate.  Same for `---` style
+    horizontal rules, which the Telegram view never needs.
+    """
     import re
     if not content:
         return ""
     # Drop HTML comment blocks (migration marker, template instructions)
     content = re.sub(r"<!--[\s\S]*?-->", "", content)
-    # Drop the top-level "# Profile" style heading
-    content = re.sub(r"^#\s+\S+.*\n", "", content.strip(), count=1)
     # Treat empty-placeholder as no content
     if "_(Empty" in content:
         return ""
+    # Drop ALL markdown headings (#, ##, ### ...).  The bot supplies the
+    # section title; an in-file heading would just duplicate it.
+    content = re.sub(r"^#{1,6}\s+.*$\n?", "", content, flags=re.MULTILINE)
+    # Drop horizontal rules (---, ***, ___) on their own line.
+    content = re.sub(r"^\s*[-*_]{3,}\s*$\n?", "", content, flags=re.MULTILINE)
     # Strip the leading [YYYY-MM-DD] ingest date prefix — it's internal
     # metadata used by lint for supersede/stale decisions, not for the user.
     content = re.sub(
@@ -604,6 +627,14 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 f"To change it say: \"set my goal to 1800 calories\"",
                 parse_mode=ParseMode.MARKDOWN,
             )
+        return
+
+    # ── Natural language: tidy / lint the wiki ───────────────────────────────
+    # "lint", "tidy up your notes", "clean up", "dedup" etc. should get the
+    # same full flow as /lint — tidy the pages, detect contradictions, DM the
+    # user about the oldest open one. Never expose the raw audit/tech output.
+    if intent == "cmd_lint":
+        await cmd_lint(update, ctx)
         return
 
     # ── Correction ──────────────────────────────────────────────────────────

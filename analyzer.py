@@ -446,6 +446,7 @@ Classify the user's message into exactly one of these intents:
   cmd_date_query — wants to see food log for a SPECIFIC past day (e.g. "what did I eat yesterday", "show yesterday", "what did I eat on Tuesday", "my food last Monday", "show me Wednesday", "what was my food on April 7th")
   cmd_week      — wants the FULL weekly review/summary covering everything (e.g. "weekly review", "how was my week overall", "give me my Sunday review", "show me this week"). NOT when the user asks about a specific nutrient, meal, or aspect — those are questions, even when they mention "this week".
   cmd_goal      — wants to CHANGE or SET their calorie goal to a specific number (e.g. "set my goal to 1800", "change my goal to 2200 calories") — NOT asking what it should be
+  cmd_lint      — wants the bot to tidy up / clean up / dedupe / review its own notes or memory about the user (e.g. "lint", "tidy up", "tidy up your notes", "clean up your notes", "dedup my notes", "dedupe", "clean up my profile", "sort out your memory", "review your notes about me", "check your notes for contradictions"). This is about the bot's own housekeeping of what it remembers — NOT about the user's food log or daily summary.
   remember      — sharing a personal fact, restriction, or INTENTION about themselves to be remembered. This covers both current-state facts AND forward-looking goals or intentions.
                   Current-state examples: "I don't eat fish", "I'm vegetarian", "I'm allergic to nuts", "I weigh 67kg", "my height is 165cm", "I go to the gym 3x a week"
                   Forward-looking examples: "I would like to eat more healthy fats", "I'm trying to cut sugar", "I want to eat less sweets", "my goal is to eat healthier", "I'd like to lose 5kg"
@@ -469,6 +470,15 @@ IMPORTANT:
     "I'm trying to cut sugar" → remember
     "my goal is to eat healthier" → remember
   Questions ask for information or advice. Statements of intent are remember.
+- cmd_lint vs question — if the user is telling the bot to clean / tidy / dedupe / review its own notes, it's cmd_lint. If they're asking for diet advice or an audit of how they're eating, it's question.
+    "lint" → cmd_lint
+    "tidy up" → cmd_lint
+    "tidy up your notes" → cmd_lint
+    "clean up your notes about me" → cmd_lint
+    "dedup my profile" → cmd_lint
+    "check for contradictions in your notes" → cmd_lint
+    "how's my diet looking?" → question
+    "audit my food this week" → question
 
 Reply with ONLY the intent word, nothing else. No explanation, no punctuation."""
 
@@ -502,7 +512,7 @@ def detect_intent(text: str) -> str:
             messages=[{"role": "user", "content": text}],
         )
         intent = response.content[0].text.strip().lower()
-        valid = {"log_text", "correction", "question", "cmd_today", "cmd_date_query", "cmd_week", "cmd_goal", "remember"}
+        valid = {"log_text", "correction", "question", "cmd_today", "cmd_date_query", "cmd_week", "cmd_goal", "cmd_lint", "remember"}
         return intent if intent in valid else "log_text"
     except Exception:
         t = text.lower()
