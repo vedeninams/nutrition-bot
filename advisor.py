@@ -837,9 +837,15 @@ def _apply_wiki_update(user_id: int, upd: dict) -> None:
         content = (upd.get("content") or "").strip()
         if not content:
             return
-        # Normalize into a bullet line if Haiku forgot the dash.
-        if not content.startswith(("-", "*")):
-            content = f"- {content}"
+        # Normalize the bullet prefix.  Haiku sometimes emits "- …", sometimes
+        # "* …", sometimes "• …" (copying the style it sees in the page).  The
+        # migrated profile template uses "•", so without this we'd end up with
+        # double-bullet lines like "- • Likes dark chocolate".  Strip every
+        # leading bullet-ish char and re-apply our canonical "- ".
+        content = _re.sub(r"^[\s\-\*•·‣⁃]+", "", content).strip()
+        if not content:
+            return
+        content = f"- {content}"
         existing = wiki.read_page(user_id, page).rstrip()
         new_content = f"{existing}\n{content}\n"
         wiki.write_page(user_id, page, new_content)

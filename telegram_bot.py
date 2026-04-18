@@ -34,6 +34,7 @@ import database as db
 import analyzer
 import advisor
 import wiki
+import lint
 
 load_dotenv()
 
@@ -83,6 +84,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/week — weekly review\n"
         "/goal — set your daily calorie goal\n"
         "/profile — see everything I know about you\n"
+        "/lint — tidy up my notes about you (dedup + drop stale)\n"
         "/help — this message",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -178,6 +180,70 @@ def _clean_wiki_for_display(content: str) -> str:
     # Collapse extra blank lines
     content = re.sub(r"\n{3,}", "\n\n", content)
     return content.strip()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /lint  — on-demand wiki tidy-up (manual trigger; 4b will add the Sunday cron)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Human-readable names for each lintable page in the Telegram reply.
+_LINT_PAGE_TITLES = {
+    "profile":  "👤 Profile",
+    "goals":    "🎯 Goals",
+    "patterns": "📊 Patterns",
+    "wins":     "🏆 Wins",
+}
+
+
+async def cmd_lint(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    Run a foreground lint pass over the caller's wiki and report what changed.
+
+    Backups are written to wiki/user_<id>/.backups/ before any page is
+    overwritten (last 3 kept per page), so this is safe to run ad-hoc.
+    """
+    user_id = update.effective_user.id
+    db.ensure_user(user_id)  # make sure their wiki exists
+    await _typing(update)
+    await update.message.reply_text(
+        "🧹 Tidying up my notes about you… this takes a few seconds."
+    )
+
+    try:
+        result = await lint.lint_user_wiki(user_id)
+    except Exception as e:
+        log.exception(f"lint failed for user={user_id}: {e}")
+        await update.message.reply_text(
+            "😕 Something went wrong while tidying up. Your notes weren't changed."
+        )
+        return
+
+    # Build a per-page summary.
+    lines = ["✅ Done. Here's what changed:"]
+    any_change = False
+    for page, title in _LINT_PAGE_TITLES.items():
+        info = result.get(page, {})
+        if info.get("skipped"):
+            lines.append(f"{title}: skipped (empty)")
+            continue
+        before = info.get("before", 0)
+        after  = info.get("after", 0)
+        if before == after:
+            lines.append(f"{title}: no change ({before} lines)")
+        else:
+            any_change = True
+            delta = before - after
+            lines.append(f"{title}: {before} → {after} lines (−{delta})")
+
+    if not any_change:
+        lines.append("\nNothing needed tidying today — your notes are clean.")
+    else:
+        lines.append(
+            "\n_Backups of the previous versions are saved in case I got "
+            "anything wrong — ask me to restore if something looks off._"
+        )
+
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -710,6 +776,7 @@ def main():
     app.add_handler(CommandHandler("week", cmd_week))
     app.add_handler(CommandHandler("goal", cmd_goal))
     app.add_handler(CommandHandler("profile", cmd_profile))
+    app.add_handler(CommandHandler("lint", cmd_lint))
     app.add_handler(CommandHandler("clear_today", cmd_clear_today))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
