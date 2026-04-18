@@ -380,25 +380,21 @@ User's daily calorie goal: {goal} kcal
 Data for the past {len(month_data)} days (all available history):
 {month_summary}
 
-Write a thorough review in exactly 5 paragraphs, each separated by a blank line. This is a once-a-week message so it should be detailed and comprehensive enough to be truly useful:
+Write a concise review in exactly 3 short paragraphs, each separated by a blank line. Keep it tight — the user wants signal, not padding.
 
-Paragraph 1 - This week verdict: How did this week go overall? Discuss calorie consistency, protein intake, and how many days were on-track vs off-track. Be specific with numbers and give a clear verdict.
+Paragraph 1 — This week verdict: overall calorie consistency + protein, with specific numbers and a clear verdict. Mention the best and worst day briefly.
 
-Paragraph 2 - Wins & highlights: What went well this week or over the full period? Celebrate specific positive patterns, improvements, or good habits you notice in the data. Be genuine and specific.
+Paragraph 2 — The main pattern worth noticing: one observation from the longer arc (or this week's highlight if no longer history exists). Combine wins and gaps honestly.
 
-Paragraph 3 - Patterns & trends over the full history: Look at the longer arc of all available data. What recurring habits do you see? Are things improving, plateauing, or sliding? Mention specific days or weeks where things shifted.
+Paragraph 3 — One concrete recommendation for the coming week, tied directly to what you just said.
 
-Paragraph 4 - Areas to improve: Where are the weak spots? What patterns are holding them back? Be honest but kind - name the specific issue and why it matters for their goal.
-
-Paragraph 5 - Concrete plan for the coming week: Give 2-3 specific, actionable recommendations for the week ahead. Make them practical and tied directly to the patterns you identified. Not generic advice.
-
-Each paragraph should be 2-4 sentences. Warm, coach-like tone. No bullet points. No headers. Just paragraphs.
-Use Telegram formatting: *bold* for key numbers, food names, or important insights.
+Each paragraph should be 2-3 sentences MAX. Warm, coach-like tone. No bullet points. No headers. Just short paragraphs.
+Use Telegram formatting: *bold* sparingly for key numbers.
 Reply in the same language the user typically uses."""
 
     response = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=700,
+        max_tokens=400,
         messages=[{"role": "user", "content": prompt}]
     )
 
