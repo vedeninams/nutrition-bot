@@ -47,6 +47,13 @@ Chronological, append-only record of notable wiki events. Coarse-grained — 1-3
 
 ## Ingest rules (when updating the wiki)
 
+0. **Stamp every line with `[YYYY-MM-DD]` at ingest.** In `profile.md`, `goals.md`, `patterns.md`, and `wins.md`, every new or edited bullet must start with today's date in square brackets, e.g. `- [2026-04-18] Vegetarian since 2019`. This internal metadata lets lint reason about recency (supersede the older of two contradicting lines, drop time-bounded goals past their window). Rules:
+   - **On add:** prefix with today's date.
+   - **On edit:** bump to today's date (the line reflects current knowledge).
+   - **On merge:** keep the later of the two dates.
+   - **Do NOT retroactively stamp** pre-convention lines that arrived without a prefix; leave them unprefixed. Lint treats unprefixed lines as pre-convention and won't try to guess their age.
+   - **Do NOT stamp `log.md`** — it already uses `## [YYYY-MM-DD]` section headers.
+   - The prefix is internal: it is stripped from `/profile` and any Telegram output. The user never sees it.
 1. **Record observations, even single ones.** Don't filter aggressively at ingest — lint consolidates later. Single observations are noted with their date so the bot knows they're tentative.
 2. **Flag contradictions in log.md.** If new information contradicts existing page content, note it in log.md and update the affected page.
 3. **Keep pages concise.** Each page caps at ~30 bullet points. If a page approaches the cap, consolidate related bullets rather than dropping them.

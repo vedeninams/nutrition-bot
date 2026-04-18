@@ -167,6 +167,14 @@ def _clean_wiki_for_display(content: str) -> str:
     # Treat empty-placeholder as no content
     if "_(Empty" in content:
         return ""
+    # Strip the leading [YYYY-MM-DD] ingest date prefix — it's internal
+    # metadata used by lint for supersede/stale decisions, not for the user.
+    content = re.sub(
+        r"^(\s*[-*•]?\s*)\[\d{4}-\d{2}-\d{2}\]\s+",
+        r"\1",
+        content,
+        flags=re.MULTILINE,
+    )
     # Collapse extra blank lines
     content = re.sub(r"\n{3,}", "\n\n", content)
     return content.strip()
