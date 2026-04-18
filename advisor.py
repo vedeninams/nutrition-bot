@@ -718,7 +718,7 @@ Respond with ONLY a JSON object (no prose, no markdown code fences) in this exac
 {{
   "reasoning": "one sentence explaining your decision",
   "updates": [
-    {{"page": "patterns|profile|goals|wins", "action": "append", "content": "- bullet text"}},
+    {{"page": "patterns|profile|goals|wins", "action": "append", "content": "- [{today}] bullet text"}},
     {{"page": "log", "action": "log_entry", "summary": "brief summary", "details": "optional"}}
   ]
 }}
@@ -726,14 +726,21 @@ Respond with ONLY a JSON object (no prose, no markdown code fences) in this exac
 Decision rules:
 - The "page" field MUST be one of exactly: "profile", "patterns", "goals", "wins", "log".
   Do NOT include the ".md" extension — write "goals", not "goals.md".
+- MANDATORY DATE PREFIX (rule 0 of the wiki schema): every bullet you append to
+  profile / goals / patterns / wins MUST start with today's date in square
+  brackets: `- [{today}] bullet text`.  No exceptions.  Lint relies on this
+  prefix to reason about recency, so a missing prefix is a bug.  Do NOT prefix
+  log_entry content — log.md has its own dated section headers.
 - If nothing is worth recording, return {{"reasoning": "...", "updates": []}}.
 - Do NOT duplicate observations already in the wiki — scan each page first.
 - SKIP: plain meal logs, corrections (e.g. "two eggs not one"), and general world-knowledge questions (e.g. "why does fermentation reduce calories?").
 - Self-statements ("I'm cutting sugar", "I felt bloated after lunch") usually deserve a bullet in the patterns or profile page.
 - Self-questions ("am I low on protein?", "am I over goal?") often reveal concerns or interests — consider a bullet in the patterns page.
 - When in doubt whether a question is about the user, LEAN self-question — do not miss important info.
-- Include today's date on new observations, e.g. "(observed {today})".
 - Bullets are one line, natural human language, no internal file references.
+- For patterns.md you may still include observation counts inside the line, e.g.
+  `- [{today}] Under-eats protein at breakfast (observed 5x since 2026-04-01)`.
+  The `[{today}]` prefix is required; the `(observed Nx since …)` tail is optional.
 - Add a log_entry ONLY for genuinely notable events: a pattern observed for the first time, a contradiction flagged, a milestone hit.
 - Respect the ~30-bullet cap per page.  If a page is nearing the cap, prefer not appending unless clearly new.
 """
