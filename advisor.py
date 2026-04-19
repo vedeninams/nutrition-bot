@@ -585,6 +585,28 @@ Your role:
 - Be warm and supportive, like a coach who wants them to succeed.
 - Reply in the same language the user writes in.
 
+LENGTH BUDGET (HARD CAP — Telegram limits one message to 4000 characters):
+- Your reply MUST fit in ~3500 characters.  Treat this as a hard limit and
+  plan your sections to finish inside it.
+- Simple data questions ("how much protein did I eat?") should stay short —
+  2-4 sentences is plenty.
+- For BROAD questions (weight-loss advice, full day/week analysis, meal plans,
+  "give me advice"), cover ALL the main angles BRIEFLY rather than deep-diving
+  into a few.  Think: a compact tour, not a thesis.  Each angle gets one
+  tight paragraph or a 2-3 bullet mini-list — enough to be useful, short
+  enough that the whole overview fits the budget.  The USER decides what
+  matters most to them, not you.
+- End a broad answer by offering deeper dives — e.g. "Want me to go deeper
+  on any of these — nutrition, strength training, meal timing, something
+  else?"  Let the user pick the priority for the next message.
+- If a topic is so big that even brief coverage would overflow, list every
+  angle you'd cover but compress the less-critical ones to a single line
+  each ("⏱ Meal timing: mostly fine, ask for details if you want") — never
+  drop angles silently.
+- Your response must ALWAYS end with a complete sentence.  If you feel you're
+  running out of room, wrap the current point cleanly and pivot to the
+  "want me to go deeper on X?" invitation.  Never leave a thought half-finished.
+
 FORMATTING RULES -this message will be displayed in Telegram:
 - Use *text* for bold (single asterisk, NOT double)
 - Use _text_ for italic (single underscore)
@@ -613,7 +635,30 @@ FORMATTING RULES -this message will be displayed in Telegram:
         system=context,
         messages=messages,
     )
-    return response.content[0].text
+    text = response.content[0].text
+
+    # Safety net: if the model STILL ran over the budget its system prompt set,
+    # don't leave the user staring at a half-sentence.  Append a short note so
+    # they know to ask for more — much better UX than an abrupt cliff.  Logged
+    # so we can track how often this fires and tune the prompt if it's common.
+    if response.stop_reason == "max_tokens":
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            f"answer_question hit max_tokens for user {user_id} "
+            f"(q={question[:80]!r})"
+        )
+        # Match the reply language roughly by peeking at the last user turn —
+        # if it contains Cyrillic, use Russian; otherwise English.  Good enough
+        # for a one-line hint; we don't want a full language detector here.
+        last_user = (messages[-1].get("content") if messages else question) or ""
+        has_cyrillic = any("\u0400" <= c <= "\u04FF" for c in str(last_user))
+        if has_cyrillic:
+            hint = "\n\n_…тут я остановилась, чтобы не превысить лимит сообщения. Спросить про остальное?_"
+        else:
+            hint = "\n\n_…I paused here to stay within the message limit. Want me to keep going?_"
+        text = text.rstrip() + hint
+
+    return text
 
 
 # ─────────────────────────────────────────────────────────────────────────────
