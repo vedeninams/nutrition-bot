@@ -12,12 +12,15 @@ All functions return a list of dicts ready to pass to database.log_meal_items().
 import anthropic
 import base64
 import json
+import logging
 import re
 from typing import Optional
 from dotenv import load_dotenv
 
 load_dotenv()   # must happen before Anthropic() reads the env
 client = anthropic.Anthropic()
+
+log = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -685,9 +688,26 @@ def detect_intent(text: str, history: Optional[list[dict]] = None) -> str:
             system=INTENT_SYSTEM_PROMPT,
             messages=messages,
         )
-        intent = response.content[0].text.strip().lower()
-        valid = {"log_text", "correction", "question", "cmd_today", "cmd_date_query", "cmd_week", "cmd_goal", "cmd_lint", "remember"}
-        return intent if intent in valid else "log_text"
+        raw = response.content[0].text
+        # Be tolerant of stray decoration around the single-word answer:
+        # quotes, backticks, bold markers, trailing punctuation, etc.
+        # Before: a bare "question." was silently coerced to log_text.
+        cleaned = raw.strip().lower().strip("`\"'*_ .!?,:;")
+        valid = {"log_text", "correction", "question", "cmd_today",
+                 "cmd_date_query", "cmd_week", "cmd_goal", "cmd_lint",
+                 "remember"}
+        if cleaned in valid:
+            intent = cleaned
+        else:
+            # Last resort: pick the first valid token that appears as a
+            # whole word in the reply. Handles "intent: question" style.
+            words = re.findall(r"[a-z_]+", cleaned)
+            intent = next((w for w in words if w in valid), "log_text")
+        log.info(
+            f"detect_intent history_len={len(messages)} "
+            f"last_user={text[:80]!r} raw={raw!r} intent={intent}"
+        )
+        return intent
     except Exception:
         t = text.lower()
         if any(s in t for s in ["fix", "wrong", "actually", "remove", "delete", "исправ", "удали"]):
