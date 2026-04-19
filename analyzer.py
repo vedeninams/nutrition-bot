@@ -58,6 +58,23 @@ Each element must have exactly these keys:
                           "Hard-boiled egg 1 whole" → "Boiled egg 60g"
                           "Diced chicken breast 120g" → "Chicken breast 120g"
                           "Avocado 1/2 small" → "Avocado 70g"
+
+                COUNTABLE MULTI-PIECE ITEMS — when you see 2+ discrete countable
+                pieces of the same thing (2 fried eggs, 3 pancakes, 4 cookies,
+                5 shrimp, 6 dumplings, 2 slices of bread), output ONE row with
+                a SINGULAR name and embed the count in the dish string as
+                "× Npcs" RIGHT BEFORE the total weight.
+                Format: "<Singular name> × <N>pcs <total_weight>g"
+                Examples: 2 fried eggs (≈60g each) → "Fried egg × 2pcs 120g"
+                          3 pancakes (≈50g each)  → "Pancake × 3pcs 150g"
+                          4 shrimp (≈15g each)    → "Shrimp × 4pcs 60g"
+                          1 egg → just "Fried egg 60g" (no × marker when N=1)
+                kcal / protein_g / fat_g / carbs_g / sugar_g are the TOTAL
+                for all N pieces — not per-piece.
+
+                BULK / AMORPHOUS items (rice, oil, greens, sauce, yogurt, soup,
+                diced veg, grated cheese) → never use "× Npcs". Just ONE row
+                with the total weight.
   kcal        — number (integer or float)
   protein_g   — number
   fat_g       — number
@@ -71,7 +88,13 @@ Example (a plate of udon + a side apple):
   {"dish_name": "Udon Noodle Bowl", "dish": "Udon noodles 150g", "kcal": 220, "protein_g": 7, "fat_g": 1, "carbs_g": 44, "sugar_g": 2, "confidence": "high", "meal_type": "lunch"},
   {"dish_name": "Udon Noodle Bowl", "dish": "Tofu 80g", "kcal": 90, "protein_g": 9, "fat_g": 5, "carbs_g": 2, "sugar_g": 0, "confidence": "high", "meal_type": "lunch"},
   {"dish_name": "Udon Noodle Bowl", "dish": "Broth 200ml", "kcal": 30, "protein_g": 2, "fat_g": 0, "carbs_g": 4, "sugar_g": 1, "confidence": "medium", "meal_type": "lunch"},
-  {"dish_name": "Apple", "dish": "Apple 1 medium", "kcal": 80, "protein_g": 0, "fat_g": 0, "carbs_g": 21, "sugar_g": 15, "confidence": "high", "meal_type": "lunch"}
+  {"dish_name": "Apple", "dish": "Apple 120g", "kcal": 80, "protein_g": 0, "fat_g": 0, "carbs_g": 21, "sugar_g": 15, "confidence": "high", "meal_type": "lunch"}
+]
+
+Example with a countable multi-piece item — breakfast with 2 fried eggs + avocado:
+[
+  {"dish_name": "Medium Breakfast", "dish": "Fried egg × 2pcs 120g", "kcal": 180, "protein_g": 12, "fat_g": 14, "carbs_g": 0, "sugar_g": 0, "confidence": "high", "meal_type": "breakfast"},
+  {"dish_name": "Medium Breakfast", "dish": "Avocado 80g", "kcal": 128, "protein_g": 2, "fat_g": 12, "carbs_g": 7, "sugar_g": 1, "confidence": "high", "meal_type": "breakfast"}
 ]
 
 If you genuinely cannot identify anything, return an empty array [].
@@ -108,6 +131,19 @@ IMPORTANT: Reply with ONLY a JSON array. Each element must have these keys:
                 Estimate weight for whole items (egg ≈ 60g, banana ≈ 120g, small avocado half ≈ 70g).
                 "Rolled oats 80g" → "Oats 80g", "Banana 1 medium" → "Banana 120g",
                 "Hard-boiled egg 1 whole" → "Boiled egg 60g", "Feta cheese 50g" → "Feta 50g"
+
+                COUNTABLE MULTI-PIECE ITEMS — when the user mentions 2+ discrete
+                pieces ("3 fried eggs", "two pancakes", "4 cookies", "5 shrimp",
+                "2 bananas"), output ONE row with a SINGULAR name and embed the
+                count as "× Npcs" RIGHT BEFORE the total weight.
+                Format: "<Singular name> × <N>pcs <total_weight>g"
+                Examples: "3 fried eggs" → "Fried egg × 3pcs 180g"
+                          "2 pancakes"   → "Pancake × 2pcs 100g"
+                          "5 shrimp"     → "Shrimp × 5pcs 75g"
+                          "1 egg"        → "Fried egg 60g" (no × marker when N=1)
+                kcal / macros are the TOTAL for all N pieces.
+                BULK items (rice, oil, greens, sauce, yogurt, soup) stay as ONE
+                row with the total weight — never use "× Npcs" for bulk foods.
   kcal, protein_g, fat_g, carbs_g, sugar_g, confidence, meal_type
 
 For meal_type detect it from the user's words:

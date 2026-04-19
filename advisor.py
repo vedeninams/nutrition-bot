@@ -149,25 +149,56 @@ def _fmt_totals(totals: dict, goal: int) -> str:
 
 import re as _re
 
+# Pattern for the "× Npcs" marker the analyzer embeds in dish strings for
+# countable multi-piece items. Tolerant of formatting variants — plain "x",
+# unicode "×", with/without spaces, with/without the "pcs" suffix.
+_PCS_RE = _re.compile(r'\s*[x×]\s*(\d+)\s*(?:pcs)?\b', _re.IGNORECASE)
+
+
 def _parse_grams(dish: str) -> float:
     """Extract weight in grams (or ml) from a dish string like 'Chicken breast 120g'."""
     m = _re.search(r'(\d+(?:\.\d+)?)\s*(?:g|ml)\b', dish, _re.IGNORECASE)
     return float(m.group(1)) if m else 0.0
 
 
+def _parse_pcs(dish: str) -> int:
+    """
+    Extract piece count from "× Npcs" marker. Returns 1 if no marker found.
+
+      'Fried egg × 2pcs 120g'  -> 2
+      'Pancake ×3pcs 150g'     -> 3
+      'Fried egg 60g'          -> 1
+      'Avocado 80g'            -> 1
+
+    The analyzer puts this marker on countable multi-piece items so the
+    display shows the count explicitly. Corrections that add more of an
+    existing item may or may not include a marker — consolidation sums
+    whatever is there.
+    """
+    m = _PCS_RE.search(dish)
+    return int(m.group(1)) if m else 1
+
+
 def _dish_stem(dish: str) -> tuple[str, str]:
     """
-    Split a dish string into (stem, unit) by stripping a trailing number+unit.
+    Split a dish string into (stem, unit) by stripping both the "× Npcs"
+    marker and the trailing weight unit.
 
-      'Fried egg 60g'   -> ('Fried egg', 'g')
-      'Cooking oil 5ml' -> ('Cooking oil', 'ml')
-      'König Käse'      -> ('König Käse', '')
+      'Fried egg × 2pcs 120g' -> ('Fried egg', 'g')
+      'Fried egg 60g'         -> ('Fried egg', 'g')
+      'Cooking oil 5ml'       -> ('Cooking oil', 'ml')
+      'König Käse'            -> ('König Käse', '')
 
-    The stem is used as the grouping key so three "Fried egg 60g" rows
-    (or a "Fried egg 60g" + a corrected "Fried egg 60g") collapse into
-    one displayed line. Unit is preserved so we can rebuild the label
-    with the summed amount.
+    The stem is used as the grouping key so a photo's "Fried egg × 2pcs
+    120g" and a correction's "Fried egg 60g" collapse under one key and
+    their counts can be summed. Unit is preserved so we can rebuild the
+    label with the summed amount.
     """
+    # Strip "× Npcs" first (can appear anywhere, but usually mid-string)
+    dish = _PCS_RE.sub(' ', dish).strip()
+    # Collapse any double-spaces the substitution left behind.
+    dish = _re.sub(r'\s+', ' ', dish)
+    # Then strip trailing weight.
     m = _re.search(r'\s*(\d+(?:\.\d+)?)\s*(g|ml)\s*$', dish, _re.IGNORECASE)
     if m:
         return dish[:m.start()].strip(), m.group(2).lower()
@@ -204,7 +235,11 @@ def _consolidate_items(items: list[dict]) -> list[dict]:
                 "sugar_g": 0.0,
             }
         acc = merged[key]
-        acc["_count"]    += 1
+        # Count PIECES, not rows — so a single "Fried egg × 2pcs 120g" row
+        # contributes 2 to the count, and a plain "Fried egg 60g" row
+        # contributes 1. Merging a 2-piece photo row with a 1-piece
+        # correction row naturally yields 3 pieces.
+        acc["_count"]    += _parse_pcs(it.get("dish", "") or "")
         acc["grams"]     += _parse_grams(it.get("dish", "") or "")
         acc["kcal"]      += it.get("kcal", 0) or 0
         acc["protein_g"] += it.get("protein_g", 0) or 0
@@ -304,19 +339,25 @@ def log_confirmation(items: list[dict], user_id: int) -> str:
             f"{stats}{i.get('kcal', 0):.0f} kcal - {i.get('protein_g', 0):.0f}g protein"
         )
     elif len(groups) == 1:
-        # One dish, multiple ingredients - show dish name once as header, then ingredients only
+        # One dish, multiple ingredients - show dish name once as header, then ingredients only.
+        # Route the ingredient list through _consolidate_items so any "× Npcs"
+        # markers from the analyzer are preserved in the display, and any
+        # duplicate rows (e.g. from past corrections) collapse cleanly.
         dish_name = list(groups.keys())[0]
         g = list(groups.values())[0]
         emoji = _food_emoji(dish_name)
         total_grams = sum(_parse_grams(i.get("dish", "")) for i in g)
         grams_str = f" - {total_grams:.0f}g" if total_grams > 0 else ""
+        display_g = _consolidate_items(g)
         ingredient_lines = "\n".join(
             f"  · {i.get('dish', '?')} - {i.get('kcal', 0):.0f} kcal - {i.get('protein_g', 0):.0f}g protein"
-            for i in g
+            for i in display_g
         )
+        # "N items" in the header reflects the consolidated count so it
+        # matches what the user sees on screen (not the raw DB row count).
         item_lines = (
             f"✅ Logged {emoji} *{dish_name}*\n"
-            f"{len(items)} items{grams_str} - {total_kcal:.0f} kcal - {total_protein:.0f}g protein:\n{ingredient_lines}"
+            f"{len(display_g)} items{grams_str} - {total_kcal:.0f} kcal - {total_protein:.0f}g protein:\n{ingredient_lines}"
         )
     else:
         # Multiple dishes
