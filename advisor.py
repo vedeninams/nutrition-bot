@@ -669,11 +669,21 @@ def _fmt_activity(stats: dict) -> str:
 # 5. Day summary -works for any date (today, yesterday, etc.)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def day_summary(user_id: int, for_date: str, label: str) -> str:
+def day_summary(
+    user_id: int,
+    for_date: str,
+    label: str,
+    *,
+    include_totals: bool = True,
+) -> str:
     """
     On-demand meal summary for any calendar date.
     for_date: YYYY-MM-DD string
     label:    display label shown in the header, e.g. "Today" or "Yesterday (April 8th)"
+    include_totals: when False, suppress the macro totals block at the bottom
+        of the meals section.  Used by evening_summary, which builds its own
+        totals block at the TOP of the message and wants the day-overview to
+        be pure "here's what you ate" content — no duplicated totals.
     """
     user = db.get_user(user_id) or {}
     goal = wiki.get_daily_kcal(user_id, 2000)
@@ -704,7 +714,8 @@ def day_summary(user_id: int, for_date: str, label: str) -> str:
             meal_sections.append("\n".join(section_lines))
 
         parts.append("\n" + "\n\n".join(meal_sections))
-        parts.append(f"\n{_fmt_totals(totals, goal)}")
+        if include_totals:
+            parts.append(f"\n{_fmt_totals(totals, goal)}")
     else:
         parts.append("\n_No food logged._")
 
@@ -723,13 +734,16 @@ def day_summary(user_id: int, for_date: str, label: str) -> str:
 
 def evening_summary(user_id: int) -> str:
     """
-    Evening push summary: today's full log + short AI analysis of what went well
-    and a recommendation based on the last 5 days of eating habits.
-    """
-    # Build the standard today log
-    base = day_summary(user_id, date.today().isoformat(), "Today")
+    Evening push summary.  Three blocks, in this order:
+      1. Macro totals for today (kcal progress + protein/fat/carbs + kcal left)
+      2. AI analysis — what went well, a 5-day pattern, one tip for tomorrow
+      3. Meal-by-meal overview for today (plus activity if present)
 
-    # Gather data for the AI analysis
+    Totals go at the top so the first thing the user sees on the notification
+    is the day's headline numbers; the narrative analysis follows; the
+    dish-by-dish detail sits at the bottom for anyone who wants to scroll.
+    """
+    # Gather data for the AI analysis + totals header
     user = db.get_user(user_id) or {}
     goal = wiki.get_daily_kcal(user_id, 2000)
     profile = wiki.read_wiki_for_prompt(user_id)
@@ -780,7 +794,19 @@ Reply in the same language the user typically uses."""
     )
 
     analysis = response.content[0].text.strip()
-    return f"{base}\n\n💬 {analysis}"
+
+    # Assemble in the new order: totals → analysis → meal overview.
+    # The meals block comes from day_summary() with include_totals=False so
+    # the totals aren't duplicated (we already put them at the top).
+    totals_block = f"📋 *Today:*\n\n{_fmt_totals(today_totals, goal)}"
+    meals_block = day_summary(
+        user_id,
+        date.today().isoformat(),
+        "Today's meals",
+        include_totals=False,
+    )
+
+    return f"{totals_block}\n\n💬 {analysis}\n\n{meals_block}"
 
 
 def today_summary(user_id: int) -> str:
