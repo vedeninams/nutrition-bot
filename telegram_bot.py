@@ -69,6 +69,29 @@ async def _typing(update: Update):
     await update.effective_chat.send_chat_action("typing")
 
 
+async def _send(update: Update, text: str, **kwargs):
+    """Send a Telegram reply AND log it to the short-term conversation memory.
+
+    Behaves exactly like `update.message.reply_text(text, **kwargs)` from the
+    caller's point of view — same positional args, same keyword args, same
+    return value — so migration is a mechanical rename.
+
+    Logging is a best-effort step: if the DB write fails for any reason, the
+    reply still goes out. We log AFTER the send so we don't record messages
+    that Telegram rejected (e.g. bad markdown, too long). kwargs (parse_mode,
+    etc.) are deliberately NOT stored — the conversation memory is about
+    semantic content, not rendering.
+    """
+    result = await update.message.reply_text(text, **kwargs)
+    try:
+        user_id = update.effective_user.id if update.effective_user else None
+        if user_id and text:
+            db.log_message(user_id, "assistant", str(text))
+    except Exception as e:
+        log.warning(f"conversation log (assistant) failed: {e}")
+    return result
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # /start  /help
 # ─────────────────────────────────────────────────────────────────────────────
@@ -76,7 +99,7 @@ async def _typing(update: Update):
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     db.ensure_user(user_id)
-    await update.message.reply_text(
+    await _send(update, 
         "👋 Hi! I'm your personal nutritionist bot.\n\n"
         "📸 *Send a photo of your food* and I'll estimate calories and macros.\n"
         "🏷 *Send a photo of a nutrition label* (I'll auto-detect it).\n"
@@ -104,7 +127,7 @@ async def cmd_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await _typing(update)
     text = advisor.today_summary(user_id)
-    await update.message.reply_text(_safe_reply(text), parse_mode=ParseMode.MARKDOWN)
+    await _send(update, _safe_reply(text), parse_mode=ParseMode.MARKDOWN)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -115,7 +138,7 @@ async def cmd_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await _typing(update)
     text = advisor.weekly_review(user_id)
-    await update.message.reply_text(_safe_reply(text), parse_mode=ParseMode.MARKDOWN)
+    await _send(update, _safe_reply(text), parse_mode=ParseMode.MARKDOWN)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -157,7 +180,7 @@ async def cmd_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
     # No parse_mode — wiki content contains `#`/`##` markdown that Telegram doesn't understand.
-    await update.message.reply_text("\n".join(parts))
+    await _send(update, "\n".join(parts))
 
 
 def _clean_wiki_for_display(content: str) -> str:
@@ -246,7 +269,7 @@ async def cmd_lint(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     db.ensure_user(user_id)  # make sure their wiki exists
     await _typing(update)
-    await update.message.reply_text(
+    await _send(update, 
         "🧹 Tidying up my notes about you… this takes a few seconds."
     )
 
@@ -255,7 +278,7 @@ async def cmd_lint(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         result = await lint.lint_user_wiki(user_id)
     except Exception as e:
         log.exception(f"lint failed for user={user_id}: {e}")
-        await update.message.reply_text(
+        await _send(update, 
             "😕 Something went wrong while tidying up. Your notes weren't changed."
         )
         return
@@ -280,7 +303,7 @@ async def cmd_lint(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "anything wrong — ask me to restore if something looks off._"
         )
 
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    await _send(update, "\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
     # ── 2. Detect + record new contradictions ────────────────────────────────
     try:
@@ -295,7 +318,7 @@ async def cmd_lint(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         pending = contradictions.oldest_open(user_id)
         if pending is not None:
-            await update.message.reply_text(
+            await _send(update, 
                 _format_contradiction_dm(pending),
                 parse_mode=ParseMode.MARKDOWN,
             )
@@ -311,11 +334,11 @@ async def cmd_clear_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     removed = db.clear_today(user_id)
     if removed:
-        await update.message.reply_text(
+        await _send(update, 
             f"🗑 Cleared {removed} item{'s' if removed != 1 else ''} logged today. Fresh start!",
         )
     else:
-        await update.message.reply_text("Nothing logged today to clear.")
+        await _send(update, "Nothing logged today to clear.")
 
 
 async def cmd_goal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -326,7 +349,7 @@ async def cmd_goal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not args:
         # Show current goal — read from goals.md (single source of truth)
         goal = wiki.get_daily_kcal(user_id, 2000)
-        await update.message.reply_text(
+        await _send(update, 
             f"🎯 Your daily calorie goal is *{goal} kcal*.\n"
             f"To change it: `/goal 1800`",
             parse_mode=ParseMode.MARKDOWN,
@@ -338,14 +361,14 @@ async def cmd_goal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if new_goal < 500 or new_goal > 10000:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("Please give a number between 500 and 10000. E.g. `/goal 1800`")
+        await _send(update, "Please give a number between 500 and 10000. E.g. `/goal 1800`")
         return
 
     # Write to goals.md under the per-user lock so a concurrent Haiku ingest
     # on the same page can't race with us.
     async with wiki.get_lock(user_id):
         wiki.set_daily_kcal(user_id, new_goal)
-    await update.message.reply_text(
+    await _send(update, 
         f"✅ Daily goal set to *{new_goal} kcal*.", parse_mode=ParseMode.MARKDOWN
     )
 
@@ -384,13 +407,13 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         items, source = analyzer.analyze_photo(image_bytes, caption)
     except Exception as e:
         log.error(f"analyze_photo failed: {e}")
-        await update.message.reply_text(
+        await _send(update, 
             "😕 Something went wrong analyzing the photo. Please try again."
         )
         return
 
     if not items:
-        await update.message.reply_text(
+        await _send(update, 
             "🤔 I couldn't identify any food in that photo. "
             "Try a clearer shot, or tell me what it is in text."
         )
@@ -399,9 +422,30 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Log everything
     db.log_meal_items(user_id, items, source=source)
 
+    # ── Conversation memory: record a text summary of what the photo logged ──
+    # Photos themselves can't be replayed back to Claude in later turns, so we
+    # store a compact text stand-in. That way a follow-up like "two eggs" or
+    # "remove the salad" has a referent in the conversation history.
+    try:
+        parts = []
+        for i in items:
+            name = i.get("dish") or i.get("dish_name") or "item"
+            kcal = i.get("kcal")
+            if kcal:
+                parts.append(f"{name} ({kcal:.0f} kcal)")
+            else:
+                parts.append(str(name))
+        total_kcal = sum(i.get("kcal", 0) for i in items)
+        summary = f"[Photo logged ({source}): {', '.join(parts)} — total {total_kcal:.0f} kcal]"
+        if caption:
+            summary = f"[Caption: {caption}] {summary}"
+        db.log_message(user_id, "user", summary)
+    except Exception as e:
+        log.warning(f"conversation log (photo summary) failed: {e}")
+
     # Confirmation + alert
     reply = advisor.log_confirmation(items, user_id)
-    await update.message.reply_text(_safe_reply(reply), parse_mode=ParseMode.MARKDOWN)
+    await _send(update, _safe_reply(reply), parse_mode=ParseMode.MARKDOWN)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -430,17 +474,17 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         text = transcript.text.strip()
     except Exception as e:
         log.error(f"Whisper transcription failed: {e}")
-        await update.message.reply_text("😕 Couldn't transcribe your voice message. Please try again or type it.")
+        await _send(update, "😕 Couldn't transcribe your voice message. Please try again or type it.")
         return
 
     if not text:
-        await update.message.reply_text("🤔 I couldn't hear anything. Please try again.")
+        await _send(update, "🤔 I couldn't hear anything. Please try again.")
         return
 
     log.info(f"Voice transcribed: {text[:80]}")
 
     # Echo the transcription so the user knows what was understood
-    await update.message.reply_text(f"🎙 _{text}_", parse_mode=ParseMode.MARKDOWN)
+    await _send(update, f"🎙 _{text}_", parse_mode=ParseMode.MARKDOWN)
 
     # Reuse the exact same text handler — pass transcribed text via context
     ctx.user_data["voice_text"] = text
@@ -455,6 +499,22 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     # Voice handler stores transcribed text here; fall back to typed message
     text = ctx.user_data.pop("voice_text", None) or update.message.text or ""
+
+    # ── Short-term conversation memory ───────────────────────────────────────
+    # Record the user's turn FIRST so it's visible to every AI call below.
+    # Then fetch the rolling window (16h OR 20 messages, whichever is longer)
+    # ONCE and reuse it for intent detection, correction, and Q&A.
+    try:
+        if text:
+            db.log_message(user_id, "user", text)
+    except Exception as e:
+        log.warning(f"conversation log (user) failed: {e}")
+
+    try:
+        history = db.get_recent_conversation(user_id)
+    except Exception as e:
+        log.warning(f"get_recent_conversation failed: {e}")
+        history = None
 
     await _typing(update)
 
@@ -482,21 +542,21 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 )
             except Exception as e:
                 log.exception(f"contradiction resolve failed: {e}")
-                await update.message.reply_text(
+                await _send(update, 
                     "😕 Couldn't apply that change to my notes — please try again."
                 )
                 return
 
             if result.get("ok"):
-                await update.message.reply_text(f"✅ {result['summary']}")
+                await _send(update, f"✅ {result['summary']}")
             else:
-                await update.message.reply_text(
+                await _send(update, 
                     f"⚠️ {result.get('summary', 'Could not resolve that.')}"
                 )
             return
         # else: user wrote about something unrelated — continue to the router.
 
-    intent = analyzer.detect_intent(text)
+    intent = analyzer.detect_intent(text, history=history)
     log.info(f"user={user_id} intent={intent} text={text[:60]}")
 
     # ── iPhone Shortcut: health snapshot (steps + weight) ────────────────────
@@ -509,7 +569,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         weight = parsed.get("weight_kg")
 
         if not steps and not weight:
-            await update.message.reply_text("🤔 I couldn't read the health data. Make sure the Shortcut sends it in the expected format.")
+            await _send(update, "🤔 I couldn't read the health data. Make sure the Shortcut sends it in the expected format.")
             return
 
         # Estimate walking calories using saved weight (or parsed weight)
@@ -544,7 +604,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if assumed:
             lines.append(f"_ℹ️ Assumed: {assumed}_")
 
-        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+        await _send(update, "\n".join(lines), parse_mode=ParseMode.MARKDOWN)
         return
 
     # ── iPhone Shortcut: workout / calendar events ────────────────────────────
@@ -554,7 +614,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         workouts = analyzer.parse_workout_message(text)
 
         if not workouts:
-            await update.message.reply_text("🤔 I couldn't find any workout entries. Check the Shortcut format.")
+            await _send(update, "🤔 I couldn't find any workout entries. Check the Shortcut format.")
             return
 
         user_weight = db.get_latest_weight(user_id) or 70.0
@@ -591,7 +651,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if burn_data.get("summary"):
             lines.append(f"_{burn_data['summary']}_")
 
-        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+        await _send(update, "\n".join(lines), parse_mode=ParseMode.MARKDOWN)
         return
 
     # ── Remember: personal fact or intention to store ────────────────────────
@@ -599,14 +659,14 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # The wiki is now the single source of truth for long-term memory.
         # Fire-and-forget ingest decides whether this is a durable identity
         # fact (profile.md) or an active intention (goals.md) and writes there.
-        await update.message.reply_text("✅ Got it, I'll remember that.")
+        await _send(update, "✅ Got it, I'll remember that.")
         advisor.schedule_ingest(user_id, "remember", text, "Saved.")
         return
 
     # ── Natural language: today summary ──────────────────────────────────────
     if intent == "cmd_today":
         text_reply = advisor.today_summary(user_id)
-        await update.message.reply_text(_safe_reply(text_reply), parse_mode=ParseMode.MARKDOWN)
+        await _send(update, _safe_reply(text_reply), parse_mode=ParseMode.MARKDOWN)
         return
 
     # ── Natural language: specific past day summary ───────────────────────────
@@ -614,13 +674,13 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         from datetime import date as _date
         query_date, label = analyzer.extract_query_date(text, _date.today().isoformat())
         text_reply = advisor.day_summary(user_id, query_date, label)
-        await update.message.reply_text(_safe_reply(text_reply), parse_mode=ParseMode.MARKDOWN)
+        await _send(update, _safe_reply(text_reply), parse_mode=ParseMode.MARKDOWN)
         return
 
     # ── Natural language: weekly review ──────────────────────────────────────
     if intent == "cmd_week":
         text_reply = advisor.weekly_review(user_id)
-        await update.message.reply_text(_safe_reply(text_reply), parse_mode=ParseMode.MARKDOWN)
+        await _send(update, _safe_reply(text_reply), parse_mode=ParseMode.MARKDOWN)
         return
 
     # ── Natural language: set/check goal ─────────────────────────────────────
@@ -629,12 +689,12 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if new_goal:
             async with wiki.get_lock(user_id):
                 wiki.set_daily_kcal(user_id, new_goal)
-            await update.message.reply_text(
+            await _send(update, 
                 f"✅ Daily goal set to *{new_goal} kcal*.", parse_mode=ParseMode.MARKDOWN
             )
         else:
             current = wiki.get_daily_kcal(user_id, 2000)
-            await update.message.reply_text(
+            await _send(update, 
                 f"🎯 Your current daily goal is *{current} kcal*.\n"
                 f"To change it say: \"set my goal to 1800 calories\"",
                 parse_mode=ParseMode.MARKDOWN,
@@ -653,7 +713,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if intent == "correction":
         recent = db.get_recent_meals(user_id, limit=10)
         if not recent:
-            await update.message.reply_text(
+            await _send(update, 
                 "I don't have any recent meals to correct. Log something first!"
             )
             return
@@ -663,13 +723,13 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         last_batch = db.get_last_meal_batch(user_id, window_seconds=120)
 
         # resolve_correction now returns a LIST — one action per requested change
-        results = analyzer.resolve_correction(text, recent, last_batch=last_batch)
+        results = analyzer.resolve_correction(text, recent, last_batch=last_batch, conversation=history)
 
         # Filter out "none" actions before processing
         valid_results = [r for r in results if r.get("action", "none") != "none"]
 
         if not valid_results:
-            await update.message.reply_text(
+            await _send(update, 
                 "🤔 I'm not sure which meal you want to change. "
                 "Try being more specific, e.g. \"The feta — it was 70g not 80g. Also remove the hummus.\""
             )
@@ -764,13 +824,13 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # Send one combined reply with all changes + updated totals
         totals = db.get_today_totals(user_id)
         combined = "\n".join(reply_lines) + f"\n\n{advisor._fmt_totals(totals, goal)}"
-        await update.message.reply_text(_safe_reply(combined), parse_mode=ParseMode.MARKDOWN)
+        await _send(update, _safe_reply(combined), parse_mode=ParseMode.MARKDOWN)
         return
 
     # ── Question ─────────────────────────────────────────────────────────────
     if intent == "question":
-        answer = advisor.answer_question(user_id, text)
-        await update.message.reply_text(_safe_reply(answer), parse_mode=ParseMode.MARKDOWN)
+        answer = advisor.answer_question(user_id, text, conversation=history)
+        await _send(update, _safe_reply(answer), parse_mode=ParseMode.MARKDOWN)
         # Fire-and-forget: let Haiku decide whether this question reveals
         # something about the user worth filing (usually a self-concern like
         # "am I low on protein?").  When in doubt it leans self-question.
@@ -783,11 +843,11 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             items = analyzer.analyze_text(text)
         except Exception as e:
             log.exception(f"analyze_text failed: {e}")   # prints full traceback
-            await update.message.reply_text(f"😕 Error: {e}")  # show real error in Telegram too
+            await _send(update, f"😕 Error: {e}")  # show real error in Telegram too
             return
 
         if not items:
-            await update.message.reply_text(
+            await _send(update, 
                 "🤔 I couldn't figure out what food that describes. "
                 "Try being more specific, e.g. \"oatmeal 80g with banana\"."
             )
@@ -795,11 +855,11 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         db.log_meal_items(user_id, items, source="text")
         reply = advisor.log_confirmation(items, user_id)
-        await update.message.reply_text(_safe_reply(reply), parse_mode=ParseMode.MARKDOWN)
+        await _send(update, _safe_reply(reply), parse_mode=ParseMode.MARKDOWN)
         return
 
     # ── Fallback ─────────────────────────────────────────────────────────────
-    await update.message.reply_text(
+    await _send(update, 
         "Send me a photo of your food 📸, describe what you ate 💬, or use /help."
     )
 
@@ -936,6 +996,15 @@ async def run_lint_cron():
                 )
         except Exception as e:
             log.warning(f"could not DM contradiction prompt to user {uid}: {e}")
+
+    # 4) Housekeeping: trim the short-term conversation memory. The rolling
+    # window reader only looks at the last ~16 hours anyway; anything older
+    # than two weeks is pure dead weight. One global call, not per-user.
+    try:
+        deleted = db.purge_conversation_older_than(14)
+        log.info(f"purged {deleted} conversation_messages rows older than 14 days")
+    except Exception as e:
+        log.warning(f"purge_conversation_older_than failed: {e}")
 
     log.info("Weekly lint + contradiction pass done.")
 

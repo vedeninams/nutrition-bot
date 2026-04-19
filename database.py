@@ -118,6 +118,29 @@ def init_db():
 
             CREATE INDEX IF NOT EXISTS idx_daily_stats_user_date
                 ON daily_stats (user_id, date);
+
+            -- ─────────────────────────────────────────────
+            -- Short-term conversation memory
+            -- Every incoming user text + every outgoing bot
+            -- reply is appended here. The recent window (last
+            -- 16h OR last 20 messages, whichever is longer)
+            -- is passed as context to every conversational
+            -- Claude call so follow-ups like "yes" and
+            -- "two eggs" retain their referent.
+            --
+            -- role: 'user' | 'assistant'  (matches Claude API)
+            -- ─────────────────────────────────────────────
+            CREATE TABLE IF NOT EXISTS conversation_messages (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id         INTEGER NOT NULL,
+                ts              TEXT    NOT NULL DEFAULT (datetime('now')),
+                role            TEXT    NOT NULL,
+                content         TEXT    NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_convmsg_user_ts
+                ON conversation_messages (user_id, ts);
         """)
     # ── Migration: add dish_name to existing databases ───────────────────────
     # ALTER TABLE is a no-op if the column already exists would raise an
@@ -943,3 +966,130 @@ def get_last_meal_batch(user_id: int, window_seconds: int = 120) -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Short-term conversation memory
+#
+# Every incoming user text and every outgoing bot reply is appended to
+# conversation_messages. A rolling window of "last 16 hours OR last 20
+# messages, whichever is longer" is passed as context to every
+# conversational Claude call (intent router, correction resolver, question
+# answerer, ingest). The window is rolling rather than calendar-day, so
+# chatting around midnight stays continuous and the timezone of "today"
+# doesn't matter.
+#
+# We store BOTH roles so the model can see what it just asked ("Yes." only
+# makes sense if the prior turn was a question), and photo captions are
+# stored as user-role summary text so follow-ups like "two eggs" have a
+# referent.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Defaults used by get_recent_conversation. Tuned for Maria's typical use
+# (20-30 short messages per day, mostly food notes). Override at call site
+# if you need different bounds — e.g. tests.
+_DEFAULT_CONV_HOURS = 16
+_DEFAULT_CONV_MIN_MESSAGES = 20
+
+
+def log_message(user_id: int, role: str, content: str) -> None:
+    """Append one conversation turn. `role` must be 'user' or 'assistant'
+    (Claude API convention). Empty content is silently skipped so we don't
+    pollute the window with blank sends.
+    """
+    if role not in ("user", "assistant"):
+        raise ValueError(f"log_message role must be 'user' or 'assistant', got {role!r}")
+    if not content or not content.strip():
+        return
+    ensure_user(user_id)
+    conn = get_conn()
+    with conn:
+        conn.execute(
+            "INSERT INTO conversation_messages (user_id, role, content) VALUES (?, ?, ?)",
+            (user_id, role, content),
+        )
+    conn.close()
+
+
+def get_recent_conversation(
+    user_id: int,
+    hours: int = _DEFAULT_CONV_HOURS,
+    min_messages: int = _DEFAULT_CONV_MIN_MESSAGES,
+) -> list[dict]:
+    """Return the rolling-window conversation history for this user, oldest
+    first, shaped for Claude's API:
+
+        [
+            {"role": "user",      "content": "..."},
+            {"role": "assistant", "content": "..."},
+            ...
+        ]
+
+    Selection rule: all messages from the last `hours` hours, OR the last
+    `min_messages` messages — whichever window is LARGER. So a slow-day
+    user always sees at least `min_messages` of context, and an active-day
+    user sees everything recent.
+
+    Consecutive same-role messages are MERGED (joined with two newlines)
+    because Claude's API requires strict alternation between user and
+    assistant turns. Two user messages in a row become one user turn with
+    both texts; same for two assistant messages.
+    """
+    conn = get_conn()
+
+    # Rows from the last N hours, newest first
+    rows_by_time = conn.execute(
+        f"""SELECT role, content FROM conversation_messages
+            WHERE user_id = ?
+              AND ts >= datetime('now', ?)
+            ORDER BY ts DESC, id DESC""",
+        (user_id, f"-{int(hours)} hours"),
+    ).fetchall()
+
+    # Fallback: if the time window gave us fewer than min_messages, pull the
+    # last min_messages rows regardless of age.
+    if len(rows_by_time) < min_messages:
+        rows_by_count = conn.execute(
+            """SELECT role, content FROM conversation_messages
+               WHERE user_id = ?
+               ORDER BY ts DESC, id DESC
+               LIMIT ?""",
+            (user_id, int(min_messages)),
+        ).fetchall()
+        rows = rows_by_count
+    else:
+        rows = rows_by_time
+
+    conn.close()
+
+    # We fetched newest-first; reverse to oldest-first for Claude.
+    rows = list(reversed(rows))
+
+    # Merge consecutive same-role messages. Claude's API rejects
+    # non-alternating sequences, and we anyway want "two user messages in a
+    # row" to read like one thought to the model.
+    merged: list[dict] = []
+    for r in rows:
+        role = r["role"]
+        content = r["content"]
+        if merged and merged[-1]["role"] == role:
+            merged[-1]["content"] = merged[-1]["content"] + "\n\n" + content
+        else:
+            merged.append({"role": role, "content": content})
+    return merged
+
+
+def purge_conversation_older_than(days: int = 14) -> int:
+    """Housekeeping — drop conversation rows older than N days. Called from
+    the weekly lint cron. The rolling-window reader already ignores anything
+    older than 16h / 20 messages, so retention here is just about keeping
+    the table slim. Returns rows deleted."""
+    conn = get_conn()
+    with conn:
+        cur = conn.execute(
+            "DELETE FROM conversation_messages WHERE ts < datetime('now', ?)",
+            (f"-{int(days)} days",),
+        )
+        deleted = cur.rowcount or 0
+    conn.close()
+    return deleted

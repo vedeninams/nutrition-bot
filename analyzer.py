@@ -377,6 +377,7 @@ def resolve_correction(
     user_message: str,
     recent_meals: list[dict],
     last_batch: Optional[list[dict]] = None,
+    conversation: Optional[list[dict]] = None,
 ) -> list[dict]:
     """
     Given a correction message (possibly containing multiple corrections),
@@ -386,6 +387,11 @@ def resolve_correction(
 
     last_batch: items from the most recent logging session (same photo).
                 Highlighted in the prompt so Claude knows what "this dish" means.
+    conversation: short-term conversation memory (list of {role, content}
+                  dicts). When supplied, it's used as the messages list so
+                  the resolver can disambiguate "two eggs" from the recent
+                  back-and-forth. Should end with the user's correction
+                  message as the last turn.
     """
     history_json = json.dumps(recent_meals, indent=2, default=str)
 
@@ -411,11 +417,16 @@ def resolve_correction(
         .replace("{history}", history_json)
     )
 
+    # Prefer the full conversation window if supplied (it already ends with
+    # the user's correction message). Otherwise fall back to a single-turn
+    # call with just the correction text.
+    messages = conversation if conversation else [{"role": "user", "content": user_message}]
+
     response = client.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=800,
         system=system,
-        messages=[{"role": "user", "content": user_message}],
+        messages=messages,
     )
     text = response.content[0].text
     clean = re.sub(r"```(?:json)?", "", text).replace("```", "").strip()
@@ -488,11 +499,17 @@ HEALTH_PREFIX = "📊 health"
 WORKOUT_PREFIX = "🏋️ workouts"
 
 
-def detect_intent(text: str) -> str:
+def detect_intent(text: str, history: Optional[list[dict]] = None) -> str:
     """
     Uses Haiku to classify intent — works in any language, any phrasing.
     Falls back to 'log_text' if the API call fails.
     Shortcuts messages are detected by prefix before hitting the API.
+
+    `history` is the short-term conversation memory (list of
+    {"role", "content"} dicts, oldest first, ending with the current user
+    turn). When provided, it is passed as the messages list so follow-ups
+    like "yes" or "two eggs" retain their referent and get classified
+    correctly (e.g. "two eggs" after a photo → correction, not log_text).
     """
     if text.strip().startswith("/"):
         return "command"
@@ -504,12 +521,17 @@ def detect_intent(text: str) -> str:
     if stripped.startswith(WORKOUT_PREFIX):
         return "workout_log"
 
+    # Build the messages list. Prefer the full rolling-window history if
+    # supplied (it already ends with the current user turn), else fall back
+    # to a single-turn shot with just `text`.
+    messages = history if history else [{"role": "user", "content": text}]
+
     try:
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=10,
             system=INTENT_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": text}],
+            messages=messages,
         )
         intent = response.content[0].text.strip().lower()
         valid = {"log_text", "correction", "question", "cmd_today", "cmd_date_query", "cmd_week", "cmd_goal", "cmd_lint", "remember"}

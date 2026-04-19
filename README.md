@@ -31,7 +31,7 @@ nutrition-bot/
 
 The bot has two layers of memory:
 
-**Short-term memory** — the full conversation from today gets passed to the model on every reply, so the bot can follow natural dialogue ("Yes" after a question still makes sense) and resolve ambiguous messages in context (e.g. "there are two eggs" shortly after a photo is correctly treated as a correction, not a new log).
+**Short-term memory** — a rolling window of the most recent turns gets passed to the model on every reply, so the bot can follow natural dialogue ("Yes" after a question still makes sense) and resolve ambiguous messages in context (e.g. "there are two eggs" shortly after a photo is correctly treated as a correction, not a new log). Every incoming user message (including a text stand-in for photos) and every outgoing bot reply is stored in a `conversation_messages` SQL table. The reader returns **whichever is longer: the last 16 hours OR the last 20 messages** — the message floor prevents a midnight / timezone cliff from erasing mid-conversation context. The history is fed into intent classification, correction resolution, and Q&A. A weekly housekeeping job drops rows older than 14 days.
 
 **Long-term memory (the wiki)** — each user has a small folder of markdown pages (`wiki/user_<id>/profile.md`, `goals.md`, `patterns.md`, `wins.md`, `log.md`) that the LLM incrementally maintains. Instead of re-deriving patterns from raw data every time, observations get *synthesized* into the wiki as they happen. Queries (questions, summaries, Sunday reviews) read from the synthesized wiki rather than raw history. Once a week the bot "lints" the wiki — consolidates redundancy, flags contradictions, updates progress.
 

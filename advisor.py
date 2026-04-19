@@ -406,10 +406,15 @@ Reply in the same language the user typically uses."""
 # 4. Answer user nutrition questions
 # ─────────────────────────────────────────────────────────────────────────────
 
-def answer_question(user_id: int, question: str) -> str:
+def answer_question(user_id: int, question: str, conversation: list[dict] | None = None) -> str:
     """
     Answer any nutrition question -data queries AND general advice.
     Acts as a knowledgeable personal nutritionist, not just a data lookup.
+
+    conversation: short-term rolling-window memory (list of {role, content}
+    dicts, oldest first, ending with the current user question). When
+    supplied it's passed as the messages list so follow-ups ("and what
+    about if I add cardio?") retain context from earlier turns.
     """
     user = db.get_user(user_id) or {}
     goal = wiki.get_daily_kcal(user_id, 2000)
@@ -448,11 +453,15 @@ FORMATTING RULES -this message will be displayed in Telegram:
 """
 
     # Sonnet for advice -needs reasoning ability, not just data lookup
+    # If conversation history was supplied, use it directly (it already ends
+    # with the current user question). Otherwise fall back to a single turn.
+    messages = conversation if conversation else [{"role": "user", "content": question}]
+
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=500,
         system=context,
-        messages=[{"role": "user", "content": question}]
+        messages=messages,
     )
     return response.content[0].text
 
