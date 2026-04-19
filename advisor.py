@@ -603,9 +603,13 @@ FORMATTING RULES -this message will be displayed in Telegram:
     # with the current user question). Otherwise fall back to a single turn.
     messages = conversation if conversation else [{"role": "user", "content": question}]
 
+    # Ceiling sized to Telegram's 4000-char message cap (≈1000 tokens in English).
+    # The system prompt already tells the model to stay concise for data questions
+    # and go long only for recipes/plans/advice, so short answers stay short.
+    # Previously set to 500 — which cut off detailed advice mid-sentence.
     response = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=500,
+        max_tokens=1000,
         system=context,
         messages=messages,
     )
