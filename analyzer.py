@@ -563,6 +563,21 @@ things depending on what just happened. In particular:
     bot logged rice 100g → "150g rice"                → correction
     bot logged breakfast → "that was lunch"           → correction
     bot logged dish with 6 items → "remove the hummus"→ correction
+- If the bot just OFFERED suggestions, options, or a list of meal ideas
+  (dinner ideas, snack options, recipes, "Option 1 / Option 2", etc.) and
+  the user responds by picking one, asking for a recipe, or drilling in on
+  one of them — classify as question. These are follow-ups on the advice,
+  not new meal logs. Food-sounding words in this follow-up are referring
+  to the bot's suggestion, not something the user ate.
+  Examples (each follows a multi-option advice reply):
+    bot offered 3 dinner options → "sounds great, recipe for option 1?"   → question
+    bot offered 3 dinner options → "I like option 2, tell me how to cook" → question
+    bot offered 3 dinner options → "the chicken one, how do I make it?"   → question
+    bot offered snack ideas → "first one please"                          → question
+    bot offered protein ideas → "how much chicken would that be?"         → question
+  The word "recipe" / "recipie" / "how do I cook/make" is a strong signal
+  for question regardless of context — the user is asking how to prepare
+  something, not logging that they ate it.
 - If there is NO recent log (or the recent log is unrelated), a food
   description starting a new thought is log_text.
     (no recent log) → "I had oatmeal with banana"     → log_text
@@ -572,7 +587,7 @@ Intents:
 
   log_text      — describing food they ate, starting a new log (e.g. "I had oatmeal with banana", "for breakfast I ate eggs")
   correction    — fixing, adjusting, or deleting a just-logged entry (quantity, count, name, meal type, or removal). See context rule above.
-  question      — asking for advice, information, or analysis (e.g. "how much protein today?", "what should my calorie goal be?", "is my diet balanced?", "what should I eat for dinner?")
+  question      — asking for advice, information, analysis, a recipe, or cooking instructions (e.g. "how much protein today?", "what should my calorie goal be?", "is my diet balanced?", "what should I eat for dinner?", "give me a recipe for X", "how do I cook X?"). Also any follow-up to bot-offered suggestions/options — see context rule above.
   cmd_today     — wants to see TODAY's food log summary (e.g. "show today", "what did I eat today", "today's summary")
   cmd_date_query — wants to see food log for a SPECIFIC past day (e.g. "what did I eat yesterday", "show yesterday", "what did I eat on Tuesday", "my food last Monday", "show me Wednesday", "what was my food on April 7th")
   cmd_week      — wants the FULL weekly review/summary covering everything (e.g. "weekly review", "how was my week overall", "give me my Sunday review", "show me this week"). NOT when the user asks about a specific nutrient, meal, or aspect — those are questions, even when they mention "this week".
