@@ -874,19 +874,20 @@ Respond with ONLY a JSON object (no prose, no markdown code fences) in this exac
   "reasoning": "one sentence explaining your decision",
   "updates": [
     {{"page": "patterns|profile|goals|wins", "action": "append", "content": "- [{today}] bullet text"}},
-    {{"page": "patterns|profile|goals|wins", "action": "remove_line", "target": "distinctive substring from the existing bullet"}},
-    {{"page": "log", "action": "log_entry", "summary": "brief summary", "details": "optional"}}
+    {{"page": "patterns|profile|goals|wins", "action": "remove_line", "target": "distinctive substring from the existing bullet"}}
   ]
 }}
 
 Decision rules:
-- The "page" field MUST be one of exactly: "profile", "patterns", "goals", "wins", "log".
+- The "page" field MUST be one of exactly: "profile", "patterns", "goals", "wins".
   Do NOT include the ".md" extension — write "goals", not "goals.md".
+- Do NOT emit updates for "log" — log.md is the audit trail and is written
+  AUTOMATICALLY by the code whenever an append or remove_line is applied.
+  You do not need to (and MUST not) emit a separate log entry for a wiki change.
 - MANDATORY DATE PREFIX (rule 0 of the wiki schema): every bullet you append to
   profile / goals / patterns / wins MUST start with today's date in square
   brackets: `- [{today}] bullet text`.  No exceptions.  Lint relies on this
-  prefix to reason about recency, so a missing prefix is a bug.  Do NOT prefix
-  log_entry content — log.md has its own dated section headers.
+  prefix to reason about recency, so a missing prefix is a bug.
 - If nothing is worth recording, return {{"reasoning": "...", "updates": []}}.
 - Do NOT duplicate observations already in the wiki — scan each page first.
 - SKIP: plain meal logs, corrections (e.g. "two eggs not one"), and general world-knowledge questions (e.g. "why does fermentation reduce calories?").
@@ -897,7 +898,6 @@ Decision rules:
 - For patterns.md you may still include observation counts inside the line, e.g.
   `- [{today}] Under-eats protein at breakfast (observed 5x since 2026-04-01)`.
   The `[{today}]` prefix is required; the `(observed Nx since …)` tail is optional.
-- Add a log_entry ONLY for genuinely notable events: a pattern observed for the first time, a contradiction flagged, a milestone hit.
 - Respect the ~30-bullet cap per page.  If a page is nearing the cap, prefer not appending unless clearly new.
 
 When to emit `remove_line` (retracting a fact/goal/pattern):
@@ -1047,6 +1047,14 @@ def _apply_wiki_update(user_id: int, upd: dict) -> None:
         new_content = f"{existing}\n{content}\n"
         wiki.write_page(user_id, page, new_content)
 
+        # Audit trail: every wiki append leaves a breadcrumb in log.md, same
+        # convention as remove_line / lint / contradictions.  log.md is the
+        # single chronological ledger of every change to the wiki, so you can
+        # always trace when a line appeared (and later, if removed, when it
+        # went).  Note: log.md is append-only — lint and every other pipeline
+        # NEVER rewrite past entries, they only add new ones.
+        wiki.append_log(user_id, f"Added to {page}.md", content)
+
     elif action == "remove_line" and page in ("patterns", "profile", "goals", "wins"):
         # Delete one (or more) existing bullets from a page based on a
         # target substring Haiku picked.  Haiku sees the whole wiki in the
@@ -1093,14 +1101,17 @@ def _apply_wiki_update(user_id: int, upd: dict) -> None:
         new_content = _re.sub(r"\n{3,}", "\n\n", "\n".join(out_lines))
         wiki.write_page(user_id, page, new_content)
 
-        # Audit trail: every user-driven wiki retraction leaves a breadcrumb
-        # in log.md, matching the convention used by the weekly lint and the
-        # contradiction-resolution pipeline. This way log.md is the single
-        # place to see every change ever made to the wiki, regardless of
-        # which pipeline made it.
-        summary = f"Removed {len(removed_lines)} line(s) from {page}.md (user request)"
-        details = "\n".join(removed_lines)
-        wiki.append_log(user_id, summary, details)
+        # Audit trail: every wiki retraction leaves a breadcrumb in log.md,
+        # symmetric with the append branch above.  log.md is the single
+        # chronological ledger of every change to the wiki — adds AND
+        # removes — so "when did this line appear / disappear?" always has
+        # an answer.
+        summary = (
+            f"Removed from {page}.md"
+            if len(removed_lines) == 1
+            else f"Removed {len(removed_lines)} lines from {page}.md"
+        )
+        wiki.append_log(user_id, summary, "\n".join(removed_lines))
 
     elif action == "log_entry" and page == "log":
         summary = (upd.get("summary") or "").strip()
