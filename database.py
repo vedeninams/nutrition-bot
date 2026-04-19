@@ -1106,10 +1106,27 @@ def purge_conversation_older_than(days: int = 14) -> int:
 def delete_today_meals(user_id: int) -> int:
     """HARD-delete every meal row logged today (server calendar day). Unlike
     delete_meal (which marks as 'deleted' for the audit trail), this actually
-    removes the rows so /today totals start clean. Returns rows deleted."""
+    removes the rows so /today totals start clean. Returns rows deleted.
+
+    Because `corrections` has a FK to meals(id) with no ON DELETE CASCADE,
+    we first delete any correction rows that point at today's meals, then
+    delete the meals themselves — all inside one transaction so we don't
+    leave orphan correction rows if anything fails."""
     today = date.today().isoformat()
     conn = get_conn()
     with conn:
+        # Drop child rows first (corrections → meals) so the meals DELETE
+        # isn't blocked by `PRAGMA foreign_keys=ON`.
+        conn.execute(
+            """
+            DELETE FROM corrections
+            WHERE meal_id IN (
+                SELECT id FROM meals
+                WHERE user_id = ? AND date(logged_at) = ?
+            )
+            """,
+            (user_id, today),
+        )
         cur = conn.execute(
             "DELETE FROM meals WHERE user_id = ? AND date(logged_at) = ?",
             (user_id, today),
