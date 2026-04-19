@@ -155,6 +155,80 @@ def _parse_grams(dish: str) -> float:
     return float(m.group(1)) if m else 0.0
 
 
+def _dish_stem(dish: str) -> tuple[str, str]:
+    """
+    Split a dish string into (stem, unit) by stripping a trailing number+unit.
+
+      'Fried egg 60g'   -> ('Fried egg', 'g')
+      'Cooking oil 5ml' -> ('Cooking oil', 'ml')
+      'König Käse'      -> ('König Käse', '')
+
+    The stem is used as the grouping key so three "Fried egg 60g" rows
+    (or a "Fried egg 60g" + a corrected "Fried egg 60g") collapse into
+    one displayed line. Unit is preserved so we can rebuild the label
+    with the summed amount.
+    """
+    m = _re.search(r'\s*(\d+(?:\.\d+)?)\s*(g|ml)\s*$', dish, _re.IGNORECASE)
+    if m:
+        return dish[:m.start()].strip(), m.group(2).lower()
+    return dish.strip(), ""
+
+
+def _consolidate_items(items: list[dict]) -> list[dict]:
+    """
+    Collapse identical ingredients into one row per unique dish stem.
+
+    Three separate `Fried egg 60g / 90 kcal / 6g protein` rows become
+    one `Fried egg 180g / 270 kcal / 18g protein` row. Order is by
+    first appearance so the display still reflects how the meal was
+    logged. Rows with no parseable weight pass through as-is (we still
+    dedupe, but the dish string stays literal).
+    """
+    from collections import OrderedDict
+    merged: "OrderedDict[tuple[str, str], dict]" = OrderedDict()
+    for it in items:
+        stem, unit = _dish_stem(it.get("dish", "") or "")
+        key = (stem.lower(), unit)
+        if key not in merged:
+            # Start a fresh accumulator — copy so we don't mutate input.
+            merged[key] = {
+                "_stem": stem,
+                "_unit": unit,
+                "dish_name": it.get("dish_name"),
+                "grams": 0.0,
+                "kcal": 0.0,
+                "protein_g": 0.0,
+                "fat_g": 0.0,
+                "carbs_g": 0.0,
+                "sugar_g": 0.0,
+            }
+        acc = merged[key]
+        acc["grams"]     += _parse_grams(it.get("dish", "") or "")
+        acc["kcal"]      += it.get("kcal", 0) or 0
+        acc["protein_g"] += it.get("protein_g", 0) or 0
+        acc["fat_g"]     += it.get("fat_g", 0) or 0
+        acc["carbs_g"]   += it.get("carbs_g", 0) or 0
+        acc["sugar_g"]   += it.get("sugar_g", 0) or 0
+
+    out: list[dict] = []
+    for acc in merged.values():
+        # Rebuild a dish string from stem + summed amount.
+        if acc["_unit"] and acc["grams"] > 0:
+            dish = f"{acc['_stem']} {acc['grams']:.0f}{acc['_unit']}"
+        else:
+            dish = acc["_stem"]
+        out.append({
+            "dish": dish,
+            "dish_name": acc["dish_name"],
+            "kcal": acc["kcal"],
+            "protein_g": acc["protein_g"],
+            "fat_g": acc["fat_g"],
+            "carbs_g": acc["carbs_g"],
+            "sugar_g": acc["sugar_g"],
+        })
+    return out
+
+
 def _fmt_dish_group(items: list[dict]) -> str:
     """
     Format a group of items that belong to the same dish.
@@ -178,9 +252,14 @@ def _fmt_dish_group(items: list[dict]) -> str:
         emoji = _food_emoji(dish_name)
         stats = f"{total_grams:.0f}g - " if total_grams > 0 else ""
         header = f"{emoji} *{dish_name}*\n{stats}{total_kcal:.0f} kcal - {total_protein:.0f}g protein"
+        # Consolidate identical ingredients — e.g. three "Fried egg 60g"
+        # rows collapse to one "Fried egg 180g" row — so corrections that
+        # add more of something already on the plate don't show up as a
+        # stray duplicate line at the bottom of the list.
+        display_items = _consolidate_items(items)
         ingredient_lines = "\n".join(
             f"  · {i.get('dish', '?')} - {i.get('kcal', 0):.0f} kcal - {i.get('protein_g', 0):.0f}g protein"
-            for i in items
+            for i in display_items
         )
         return f"{header}\n{ingredient_lines}"
 
