@@ -552,20 +552,23 @@ INTENT_SYSTEM_PROMPT = """You are a router for a nutrition tracking bot.
 Classify the user's LATEST message into exactly one of these intents.
 
 USING CONVERSATION CONTEXT (DEFAULT POSTURE):
-You receive the short-term conversation history above the latest message —
-today's rolling window of prior user turns and bot replies, including compact
-summaries of what a just-sent photo logged (e.g. "[Photo logged (photo):
-Natural Yoghurt 300g (204 kcal) — total 204 kcal]").
+Each user turn you classify arrives as a single message containing
+"Today's conversation so far" (a transcript of prior turns) followed by
+the "Latest user message to classify". The transcript is context only —
+do NOT continue the conversation, do NOT write a recipe or any reply to
+it, do NOT answer questions in it. Your ONLY job is to output the
+single-word intent for the latest user message.
 
-READ IT BEFORE CLASSIFYING. The latest message is almost always a
-continuation of the ongoing dialogue, not a fresh thought. Short or terse
-messages, pronouns ("it", "that", "those"), numeric picks ("option 1",
-"the first one", "#2"), casual agreement ("sounds great", "ok let's do
-that"), and bare adjustments ("400g", "make it three") only make sense
-relative to the previous turns. Classify the CONTINUED meaning.
+READ THE TRANSCRIPT BEFORE CLASSIFYING. The latest message is almost
+always a continuation of that ongoing dialogue, not a fresh thought.
+Short or terse messages, pronouns ("it", "that", "those"), numeric
+picks ("option 1", "the first one", "#2"), casual agreement ("sounds
+great", "ok let's do that"), and bare adjustments ("400g", "make it
+three") only make sense relative to the previous turns. Classify the
+CONTINUED meaning.
 
-Only treat the message as a brand-new, standalone thought when the recent
-history truly has nothing to tie it to.
+Only treat the message as a brand-new, standalone thought when the
+transcript truly has nothing to tie it to.
 
 Common patterns this produces (illustrative, not exhaustive — use the same
 principle for any other follow-up you see):
@@ -654,17 +657,45 @@ HEALTH_PREFIX = "📊 health"
 WORKOUT_PREFIX = "🏋️ workouts"
 
 
+def _format_transcript(history: list[dict]) -> str:
+    """Render the conversation as a plain-text transcript for classifier
+    models. We keep this SEPARATE from the `messages` field so Haiku sees
+    a single-turn classification task, not a multi-turn chat it's being
+    asked to continue. (Symptom we're avoiding: with a long dialogue of
+    recipe replies in `messages`, Haiku follows the role pattern and
+    starts writing another recipe instead of emitting an intent word.)
+
+    Bot replies are truncated because we only need the gist (what the
+    bot just did) for routing — full 500-token recipes add noise.
+    """
+    parts = []
+    for msg in history:
+        role = msg.get("role", "user")
+        content = (msg.get("content") or "").strip()
+        if not content:
+            continue
+        label = "User" if role == "user" else "Bot"
+        # Truncate assistant messages to a summary-length slice. User
+        # turns are kept whole because they're short anyway and we need
+        # the exact wording for classification.
+        if role == "assistant" and len(content) > 400:
+            content = content[:400] + " …[truncated]"
+        parts.append(f"{label}: {content}")
+    return "\n\n".join(parts)
+
+
 def detect_intent(text: str, history: Optional[list[dict]] = None) -> str:
     """
-    Uses Haiku to classify intent — works in any language, any phrasing.
-    Falls back to 'log_text' if the API call fails.
-    Shortcuts messages are detected by prefix before hitting the API.
+    Classify the user's latest message into a router intent. Uses Haiku
+    so it works in any language. Falls back to 'log_text' on API errors.
 
-    `history` is the short-term conversation memory (list of
-    {"role", "content"} dicts, oldest first, ending with the current user
-    turn). When provided, it is passed as the messages list so follow-ups
-    like "yes" or "two eggs" retain their referent and get classified
-    correctly (e.g. "two eggs" after a photo → correction, not log_text).
+    The short-term conversation `history` (list of {role, content} dicts,
+    oldest first, ending with the current user turn) is rendered as a
+    TRANSCRIPT inside a single user-turn classification prompt — NOT
+    passed as the raw `messages` list. On a long dialogue the raw-list
+    approach made Haiku imitate the assistant role and start writing
+    another recipe reply; the transcript-in-single-turn approach keeps
+    the router firmly in classifier mode.
     """
     if text.strip().startswith("/"):
         return "command"
@@ -676,10 +707,29 @@ def detect_intent(text: str, history: Optional[list[dict]] = None) -> str:
     if stripped.startswith(WORKOUT_PREFIX):
         return "workout_log"
 
-    # Build the messages list. Prefer the full rolling-window history if
-    # supplied (it already ends with the current user turn), else fall back
-    # to a single-turn shot with just `text`.
-    messages = history if history else [{"role": "user", "content": text}]
+    # Build ONE user message containing (a) the transcript so far, and
+    # (b) the latest message to classify. The transcript excludes the
+    # trailing user turn so it reads as context, with the "classify
+    # this" target called out separately.
+    if history and len(history) >= 2:
+        prior = history[:-1]  # everything before the current user turn
+        transcript = _format_transcript(prior)
+        user_prompt = (
+            "Today's conversation so far (for context only — do NOT continue it):\n"
+            "---\n"
+            f"{transcript}\n"
+            "---\n\n"
+            f"Latest user message to classify:\n{text}\n\n"
+            "Reply with ONLY the intent word."
+        )
+    else:
+        user_prompt = (
+            f"Latest user message to classify:\n{text}\n\n"
+            "Reply with ONLY the intent word."
+        )
+
+    messages = [{"role": "user", "content": user_prompt}]
+    history_len = len(history) if history else 0
 
     try:
         response = client.messages.create(
@@ -704,7 +754,7 @@ def detect_intent(text: str, history: Optional[list[dict]] = None) -> str:
             words = re.findall(r"[a-z_]+", cleaned)
             intent = next((w for w in words if w in valid), "log_text")
         log.info(
-            f"detect_intent history_len={len(messages)} "
+            f"detect_intent history_len={history_len} "
             f"last_user={text[:80]!r} raw={raw!r} intent={intent}"
         )
         return intent
