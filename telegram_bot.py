@@ -803,8 +803,14 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         it["dish_name"] = dish_name
                     try:
                         db.log_meal_items(user_id, new_items, source="correction")
-                        n = len(new_items)
-                        reply_lines.append(f"➕ Added {n} more to *{dish_name}*")
+                        # Show *what* was added, not just "1 more" — Maria
+                        # asked for the item name to be visible in the reply.
+                        added_desc = ", ".join(
+                            it.get("dish", "item") for it in new_items
+                        )
+                        reply_lines.append(
+                            f"➕ Added *{added_desc}* to *{dish_name}*"
+                        )
                     except Exception as e:
                         log.warning(f"add_items failed: {e}")
                         reply_lines.append(f"⚠️ Couldn't add extra items to *{dish_name}*")
