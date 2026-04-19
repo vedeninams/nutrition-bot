@@ -215,9 +215,11 @@ def _consolidate_items(items: list[dict]) -> list[dict]:
     out: list[dict] = []
     for acc in merged.values():
         # Rebuild a dish string from stem + count + summed amount.
-        # The ×N marker only appears when we actually merged 2+ rows —
-        # single items stay clean (no noisy "×1").
-        count_str = f" ×{acc['_count']}" if acc["_count"] > 1 else ""
+        # The "× Npcs" marker only appears when we actually merged 2+
+        # rows — single items stay clean (no noisy "× 1pcs"). The "pcs"
+        # word is deliberate visual punctuation between the count and
+        # the gram total, so `3 180g` can't read as one number.
+        count_str = f" × {acc['_count']}pcs" if acc["_count"] > 1 else ""
         if acc["_unit"] and acc["grams"] > 0:
             dish = f"{acc['_stem']}{count_str} {acc['grams']:.0f}{acc['_unit']}"
         else:
