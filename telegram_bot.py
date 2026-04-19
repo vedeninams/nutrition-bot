@@ -331,17 +331,6 @@ async def cmd_lint(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # /goal  — set or view daily calorie target
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def cmd_clear_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    removed = db.clear_today(user_id)
-    if removed:
-        await _send(update,
-            f"🗑 Cleared {removed} item{'s' if removed != 1 else ''} logged today. Fresh start!",
-        )
-    else:
-        await _send(update, "Nothing logged today to clear.")
-
-
 async def cmd_reset_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Full test-cleanup: wipe everything written today for this user.
 
@@ -354,36 +343,50 @@ async def cmd_reset_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     Leaves intact: historical data from prior days, long-term wiki facts
     that were stamped on earlier dates.
+
+    Also wired as the handler for /clear_today (backward-compat alias —
+    previously /clear_today was a lighter meals-only soft-delete; it's
+    now unified with /reset_today to avoid the "which one do I use"
+    problem).
     """
     user_id = update.effective_user.id
-    db.ensure_user(user_id)
 
-    # Hold the wiki lock for the page edits so a parallel ingest from the
-    # last test message can't race us.
-    async with wiki.get_lock(user_id):
-        meals_removed = db.delete_today_meals(user_id)
-        stats_removed = db.delete_today_stats(user_id)
-        conv_removed = db.delete_today_conversation(user_id)
-        try:
-            wiki_stripped = wiki.strip_today_lines(user_id)
-        except Exception as e:
-            log.warning(f"strip_today_lines failed: {e}")
-            wiki_stripped = {}
+    # Wrap everything in a top-level try/except so any error surfaces to
+    # the user instead of silently vanishing — a silent handler failure
+    # looks identical to the command not being registered, which is
+    # exactly the kind of ambiguity worth ruling out.
+    try:
+        db.ensure_user(user_id)
 
-    lines = ["🧹 *Reset today* — cleared test data:"]
-    lines.append(f"• Meals: {meals_removed}")
-    lines.append(f"• Daily stats: {stats_removed}")
-    lines.append(f"• Conversation turns: {conv_removed}")
-    if wiki_stripped:
-        total = sum(wiki_stripped.values())
-        per_page = ", ".join(f"{k}: {v}" for k, v in wiki_stripped.items())
-        lines.append(f"• Wiki lines stamped today: {total} ({per_page})")
-    else:
-        lines.append("• Wiki lines stamped today: 0")
-    lines.append("")
-    lines.append("History from prior days untouched.")
+        # Hold the wiki lock for the page edits so a parallel ingest from
+        # the last test message can't race us.
+        async with wiki.get_lock(user_id):
+            meals_removed = db.delete_today_meals(user_id)
+            stats_removed = db.delete_today_stats(user_id)
+            conv_removed = db.delete_today_conversation(user_id)
+            try:
+                wiki_stripped = wiki.strip_today_lines(user_id)
+            except Exception as e:
+                log.warning(f"strip_today_lines failed: {e}")
+                wiki_stripped = {}
 
-    await _send(update, "\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+        lines = ["🧹 *Reset today* — cleared test data:"]
+        lines.append(f"• Meals: {meals_removed}")
+        lines.append(f"• Daily stats: {stats_removed}")
+        lines.append(f"• Conversation turns: {conv_removed}")
+        if wiki_stripped:
+            total = sum(wiki_stripped.values())
+            per_page = ", ".join(f"{k}: {v}" for k, v in wiki_stripped.items())
+            lines.append(f"• Wiki lines stamped today: {total} ({per_page})")
+        else:
+            lines.append("• Wiki lines stamped today: 0")
+        lines.append("")
+        lines.append("History from prior days untouched.")
+
+        await _send(update, "\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        log.exception(f"cmd_reset_today failed for user={user_id}: {e}")
+        await _send(update, f"😕 Reset failed: {e}")
 
 
 async def cmd_goal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1106,7 +1109,9 @@ def main():
     app.add_handler(CommandHandler("goal", cmd_goal))
     app.add_handler(CommandHandler("profile", cmd_profile))
     app.add_handler(CommandHandler("lint", cmd_lint))
-    app.add_handler(CommandHandler("clear_today", cmd_clear_today))
+    # /clear_today kept as a backward-compat alias for /reset_today so any
+    # muscle memory or old pinned messages still work.
+    app.add_handler(CommandHandler("clear_today", cmd_reset_today))
     app.add_handler(CommandHandler("reset_today", cmd_reset_today))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
