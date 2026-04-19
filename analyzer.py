@@ -364,6 +364,24 @@ The following action types are available:
    "remove extra X logs", "I logged X twice", "remove duplicate entries".
    Match the dish_name exactly as it appears in the meal history.
 
+8. Add MORE of something that's already in the recent log — user is correcting the count upward:
+   Return: {{"action": "add_items", "dish_name": "<exact dish name from history>", "items": [<full item dict>, ...], "reason": "..."}}
+   Each item in `items` must be a complete nutrition dict with the same keys as the existing
+   log rows: {{"dish_name": ..., "dish": ..., "kcal": ..., "protein_g": ..., "fat_g": ...,
+   "carbs_g": ..., "sugar_g": ..., "meal_type": ...}}.
+   COPY numeric values from the matching row(s) in meal history — one existing entry tells
+   you the per-unit calories/macros for this ingredient.
+   Use when the user says things like:
+   - Bot logged 2 fried eggs → "there are three eggs" / "actually three eggs"
+     → add ONE more fried egg item (difference = 3 − 2 = 1)
+   - Bot logged 1 slice of bread → "I had two slices"
+     → add ONE more bread slice item
+   - Bot logged 100g rice → "it was 150g rice"
+     → this is UPDATE (single row quantity change), NOT add_items.
+     add_items is for DISCRETE countable things (eggs, slices, pieces), not weights.
+   CRITICAL: set dish_name EXACTLY as it appears in existing history so the new rows
+   join the same meal/dish grouping. Leave meal_type the same as the existing rows.
+
 If you cannot match a specific correction to any meal, include:
    {{"action": "none", "meal_id": null, "updates": {{}}, "reason": "Could not identify meal"}}
 
@@ -448,10 +466,34 @@ def resolve_correction(
 # ─────────────────────────────────────────────────────────────────────────────
 
 INTENT_SYSTEM_PROMPT = """You are a router for a nutrition tracking bot.
-Classify the user's message into exactly one of these intents:
+Classify the user's LATEST message into exactly one of these intents.
 
-  log_text      — describing food they ate (e.g. "I had oatmeal with banana", "for breakfast I ate eggs")
-  correction    — fixing or deleting a previous log entry (e.g. "actually it was a whole avocado", "remove the yogurt", "that was wrong")
+USING CONVERSATION CONTEXT:
+You may receive a short conversation history above the latest message (prior
+user turns and bot replies, including compact summaries of what a just-sent
+photo logged — e.g. "[Photo logged (photo): Fried egg 60g (90 kcal), Fried
+egg 60g (90 kcal), ...]"). USE that context — the same words mean different
+things depending on what just happened. In particular:
+
+- If the bot just logged food and the user's next message factually contradicts
+  or adjusts that log (quantity, count, meal type, name, or says "remove X") —
+  classify as correction, NOT a new log.
+  Examples (each follows a "✅ Logged ..." reply):
+    bot logged 2 eggs → "there are three eggs"       → correction
+    bot logged 2 eggs → "actually three eggs"         → correction
+    bot logged avocado 80g → "it was a whole avocado" → correction
+    bot logged rice 100g → "150g rice"                → correction
+    bot logged breakfast → "that was lunch"           → correction
+    bot logged dish with 6 items → "remove the hummus"→ correction
+- If there is NO recent log (or the recent log is unrelated), a food
+  description starting a new thought is log_text.
+    (no recent log) → "I had oatmeal with banana"     → log_text
+    (no recent log) → "three eggs for breakfast"      → log_text
+
+Intents:
+
+  log_text      — describing food they ate, starting a new log (e.g. "I had oatmeal with banana", "for breakfast I ate eggs")
+  correction    — fixing, adjusting, or deleting a just-logged entry (quantity, count, name, meal type, or removal). See context rule above.
   question      — asking for advice, information, or analysis (e.g. "how much protein today?", "what should my calorie goal be?", "is my diet balanced?", "what should I eat for dinner?")
   cmd_today     — wants to see TODAY's food log summary (e.g. "show today", "what did I eat today", "today's summary")
   cmd_date_query — wants to see food log for a SPECIFIC past day (e.g. "what did I eat yesterday", "show yesterday", "what did I eat on Tuesday", "my food last Monday", "show me Wednesday", "what was my food on April 7th")
@@ -467,8 +509,7 @@ IMPORTANT:
 - "what should my goal be?" → question
 - "set my goal to 1800" → cmd_goal (only when setting a specific number)
 - "I don't eat fish", "please remember I hate cilantro", "I'm lactose intolerant" → remember
-- "wait, actually this was breakfast" → question
-- correction is ONLY when changing a specific logged food item
+- "wait, actually this was breakfast" AFTER a just-logged meal → correction (meal-type change)
 - ANY mention of a specific past day when asking about food/eating → cmd_date_query (NOT cmd_today)
   Examples: "yesterday", "Tuesday", "last Monday", "April 7th" → cmd_date_query
 - Specific-topic questions that happen to mention "this week" are STILL questions, not cmd_week:

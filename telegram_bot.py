@@ -742,8 +742,29 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         for result in valid_results:
             action = result.get("action", "none")
 
+            # ── Add MORE of something already logged ─────────────────────────
+            # e.g. bot logged 2 eggs from a photo; user says "there are three
+            # eggs" → resolver emits add_items with one new egg entry.
+            if action == "add_items":
+                new_items = result.get("items", [])
+                dish_name = result.get("dish_name", "")
+                if dish_name and new_items:
+                    # Force the new rows into the existing dish grouping so
+                    # later corrections/edits treat them as one dish.
+                    for it in new_items:
+                        it["dish_name"] = dish_name
+                    try:
+                        db.log_meal_items(user_id, new_items, source="correction")
+                        n = len(new_items)
+                        reply_lines.append(f"➕ Added {n} more to *{dish_name}*")
+                    except Exception as e:
+                        log.warning(f"add_items failed: {e}")
+                        reply_lines.append(f"⚠️ Couldn't add extra items to *{dish_name}*")
+                else:
+                    reply_lines.append("⚠️ I didn't have enough info to add the extra item")
+
             # ── Bulk meal type reclassification ──────────────────────────────
-            if action == "update_many":
+            elif action == "update_many":
                 meal_ids = result.get("meal_ids", [])
                 updates = result.get("updates", {})
                 if meal_ids and updates:
