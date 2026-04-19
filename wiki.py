@@ -170,6 +170,144 @@ def append_log(user_id: int, summary: str, details: str = "") -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Calorie goal — read/write helpers backed by goals.md
+#
+# Per Karpathy's "LLM Wiki" design, everything about the user lives in markdown
+# pages. The calorie goal used to sit in SQL (`users.daily_kcal`) as a legacy
+# — we've moved it here so goals.md is the single source of truth. Budget math
+# reads via get_daily_kcal(); /goal N and natural-language setters write via
+# set_daily_kcal(); a one-time migration copies the old SQL value over.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Canonical shape we always WRITE. One visual anchor, distinctive label, clean
+# to parse. Haiku is told to use exactly this shape when recording a calorie
+# target (see wiki_instructions.md).
+_CALORIE_GOAL_CANONICAL = "- **Daily calorie goal**: {kcal} kcal"
+
+# Lenient reader/consolidator regex. Matches a bullet line whose label is some
+# combination of "daily" / "calorie" / "goal" / "target" AND whose unit is
+# "kcal". Requiring the kcal unit means lines like "Goal weight: 60kg" or
+# "target 30g protein" are *never* matched — their unit is kg/g, not kcal.
+#
+# Tolerates the `[YYYY-MM-DD]` ingest date-prefix convention (see
+# wiki_instructions.md §Ingest rule 0) between the bullet and the label.
+#
+# Captures the integer in group 1. MULTILINE so ^ anchors per-line.
+_CALORIE_GOAL_RE = re.compile(
+    r"^[ \t]*[-*+][ \t]+"                              # bullet marker
+    r"(?:\[\d{4}-\d{2}-\d{2}\][ \t]+)?"                # optional date prefix
+    r"(?:\*\*)?"                                        # optional open bold
+    r"(?:daily\s+)?(?:calorie\s+)?(?:goal|target)"     # label words
+    r"(?:\*\*)?"                                        # optional close bold
+    r"[ \t]*[:—–\-]?[ \t]*"                            # optional separator
+    r"(\d[\d,]*)"                                       # the number
+    r"[ \t]*kcal"                                       # unit MUST be kcal
+    r".*$",                                             # rest of line
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def get_daily_kcal(user_id: int, default: int = 2000) -> int:
+    """Read the calorie goal from goals.md. Returns `default` if the line is
+    missing or malformed — never crashes on hand-edits or Haiku drift."""
+    content = read_page(user_id, "goals")
+    if not content:
+        return default
+    m = _CALORIE_GOAL_RE.search(content)
+    if not m:
+        return default
+    try:
+        return int(m.group(1).replace(",", ""))
+    except (ValueError, AttributeError):
+        return default
+
+
+def consolidate_goal_line(user_id: int) -> dict:
+    """Consolidate calorie-goal-ish lines in goals.md to the single canonical form.
+
+    Run by `/lint`. Idempotent — does nothing if there are 0 or 1 matches, or
+    if the only match is already in canonical shape and placed correctly.
+
+    Rule when multiple matches exist: keep the LAST one's number (later wins,
+    matching append-ordered ingest semantics) and rewrite to canonical form.
+
+    Returns {"found": N, "kept": int|None, "rewrote": bool}.
+
+    Caller is responsible for holding `get_lock(user_id)`.
+    """
+    ensure_user_wiki(user_id)
+    content = read_page(user_id, "goals")
+    if not content:
+        return {"found": 0, "kept": None, "rewrote": False}
+
+    matches = list(_CALORIE_GOAL_RE.finditer(content))
+    if not matches:
+        return {"found": 0, "kept": None, "rewrote": False}
+
+    # Later match wins (append-ordered ingest → LAST = most recent).
+    try:
+        kept_value = int(matches[-1].group(1).replace(",", ""))
+    except (ValueError, AttributeError):
+        return {"found": len(matches), "kept": None, "rewrote": False}
+
+    canonical = _CALORIE_GOAL_CANONICAL.format(kcal=kept_value)
+
+    # No consolidation needed if there's exactly one match AND it already
+    # matches the canonical bytes AND it sits right below the `# Goals`
+    # heading (modulo blank lines). The simplest-correct check: rebuild what
+    # set_daily_kcal would produce and compare.
+    rebuilt = _rewrite_goals_with_canonical(content, canonical)
+    if rebuilt == content:
+        return {"found": len(matches), "kept": kept_value, "rewrote": False}
+
+    write_page(user_id, "goals", rebuilt)
+    return {"found": len(matches), "kept": kept_value, "rewrote": True}
+
+
+def _rewrite_goals_with_canonical(content: str, canonical: str) -> str:
+    """Shared helper used by both set_daily_kcal and consolidate_goal_line.
+
+    Produces a goals.md where:
+      - every calorie-goal-ish line is stripped,
+      - one canonical bullet is inserted right under `# Goals`,
+      - the `_(Empty ...)_` placeholder is removed if still present,
+      - blank-line runs are collapsed, single trailing newline.
+    """
+    stripped = _CALORIE_GOAL_RE.sub("", content)
+    stripped = strip_empty_placeholder(stripped)
+    stripped = re.sub(r"\n{3,}", "\n\n", stripped)
+
+    heading_re = re.compile(r"^#[ \t]+goals[ \t]*$", re.IGNORECASE | re.MULTILINE)
+    m = heading_re.search(stripped)
+    if m:
+        insert_at = m.end()
+        new_content = stripped[:insert_at] + "\n\n" + canonical + stripped[insert_at:]
+    else:
+        new_content = f"# Goals\n\n{canonical}\n\n{stripped.lstrip()}"
+
+    return re.sub(r"\n{3,}", "\n\n", new_content).rstrip() + "\n"
+
+
+def set_daily_kcal(user_id: int, kcal: int) -> None:
+    """Upsert the canonical calorie-goal bullet in goals.md.
+
+    Strips EVERY existing calorie-goal-ish line (canonical form, legacy
+    phrasings, Haiku-ingested prose — anything the lenient regex matches) and
+    inserts exactly one canonical bullet right under the `# Goals` heading.
+    All non-calorie bullets (weight in kg, sugar, protein in g, etc.) are
+    preserved byte-for-byte since the regex never matches them.
+
+    Caller is responsible for holding `get_lock(user_id)` if concurrent
+    Haiku ingests may be running against the same page.
+    """
+    ensure_user_wiki(user_id)
+    content = read_page(user_id, "goals")
+    canonical = _CALORIE_GOAL_CANONICAL.format(kcal=int(kcal))
+    new_content = _rewrite_goals_with_canonical(content, canonical)
+    write_page(user_id, "goals", new_content)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # One-time migration of legacy SQL profile → profile.md
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -207,4 +345,54 @@ def migrate_sql_profile_if_needed(user_id: int, sql_profile: str) -> bool:
         f"{sql_profile.strip()}\n"
     )
     profile_path.write_text(migrated, encoding="utf-8")
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# One-time migration of legacy SQL daily_kcal → goals.md canonical line
+# ─────────────────────────────────────────────────────────────────────────────
+
+_GOAL_MIGRATION_MARKER = "<!-- migrated_sql_daily_kcal"
+
+
+def migrate_sql_goal_if_needed(user_id: int, sql_kcal) -> bool:
+    """Copy legacy SQL `users.daily_kcal` value into goals.md as the canonical
+    `- **Daily calorie goal**: N kcal` bullet.
+
+    Idempotent — stamps a marker into goals.md so the migration runs at most
+    once per user. Safe to call on every ensure_user call. Uses set_daily_kcal
+    under the hood so any pre-existing calorie-goal-ish lines (legacy Haiku
+    phrasings like "Target 1850 kcal/day") are consolidated into one canonical
+    line at the same time.
+
+    Returns True if a line was written, False if already stamped or SQL was
+    empty/None.
+    """
+    ensure_user_wiki(user_id)
+    goals_path = user_wiki_dir(user_id) / "goals.md"
+    current = goals_path.read_text(encoding="utf-8") if goals_path.exists() else ""
+
+    # Already migrated — nothing to do.
+    if _GOAL_MIGRATION_MARKER in current:
+        return False
+
+    date_str = datetime.now().strftime("%Y-%m-%d")
+
+    # Nothing to migrate — stamp the marker so we don't re-check forever.
+    try:
+        kcal_int = int(sql_kcal) if sql_kcal is not None else 0
+    except (TypeError, ValueError):
+        kcal_int = 0
+
+    if kcal_int <= 0:
+        stamped = f"{_GOAL_MIGRATION_MARKER} on {date_str}: empty -->\n{current}"
+        goals_path.write_text(stamped, encoding="utf-8")
+        return False
+
+    # Place the canonical line (set_daily_kcal handles stripping existing
+    # variants), then prepend the migration marker so we don't re-run.
+    set_daily_kcal(user_id, kcal_int)
+    migrated = goals_path.read_text(encoding="utf-8")
+    stamped = f"{_GOAL_MIGRATION_MARKER} on {date_str} -->\n{migrated}"
+    goals_path.write_text(stamped, encoding="utf-8")
     return True

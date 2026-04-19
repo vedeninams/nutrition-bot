@@ -21,13 +21,30 @@ Durable identity facts that are almost never changing. Dietary restrictions ("ve
 
 ### goals.md — What they're working toward
 Anything the user is actively trying to do, numeric or not. Examples:
-  - "target 1800 kcal/day"
+  - "- **Daily calorie goal**: 1800 kcal"
   - "trying to lose 5 kg"
   - "cutting sugar for the next month"
   - "wants to eat less sweets"
   - "add more protein at breakfast"
 
 Current strategies, progress notes, and target numbers all live here. Should reflect the current state, not every past goal.
+
+**Canonical format for the daily calorie goal.** There is exactly ONE line in
+goals.md that carries the numeric daily kcal target, and it MUST use this shape
+so the bot can read and update it programmatically:
+
+```
+- **Daily calorie goal**: 1800 kcal
+```
+
+Rules for this specific line:
+- Use the bullet prefix `- **Daily calorie goal**: N kcal` — bold label, colon,
+  integer (commas allowed), the literal word `kcal`.
+- If the user mentions a new calorie target, REPLACE the existing line rather
+  than adding a second one. Only one canonical calorie-goal line should exist
+  at any time. (If you see two, that's a bug and `/lint` will fix it.)
+- Other goal bullets (kg targets, sugar, protein, habits) stay in their own
+  free-form style — the canonical format applies only to the daily kcal target.
 
 **Quick rule**: ask yourself "is this who they ARE (→ profile) or what they're trying to DO (→ goals)?". "I'm vegetarian" = ARE. "I'm trying to eat less meat" = DO.
 

@@ -396,6 +396,40 @@ async def lint_user_wiki(user_id: int) -> dict:
                 f"lines {before_lines}→{after_lines} (rewritten)"
             )
 
+        # Deterministic pass on goals.md: consolidate any calorie-goal-ish
+        # drift (multiple "Target 1800 kcal/day" style lines, or a legacy
+        # phrasing that Haiku kept) into the single canonical bullet. Runs
+        # after Haiku so Haiku's text-level dedup has already happened; this
+        # is the belt-and-braces fix-up for the one line the app reads
+        # programmatically. Still inside the lock.
+        try:
+            consol = wiki.consolidate_goal_line(user_id)
+            if consol.get("rewrote"):
+                # Fold it into the goals result so the log line reflects reality.
+                after_lines = _line_count(wiki.read_page(user_id, "goals"))
+                goals_info = result.get("goals", {})
+                if goals_info.get("skipped"):
+                    # Goals was empty at the top of the loop but somehow had a
+                    # kcal line — surface it as its own entry instead.
+                    result["goals"] = {
+                        "before": goals_info.get("before", 0),
+                        "after": after_lines,
+                        "rewritten": True,
+                        "consolidated_goal_line": True,
+                    }
+                else:
+                    goals_info["after"] = after_lines
+                    goals_info["rewritten"] = True
+                    goals_info["consolidated_goal_line"] = True
+                    result["goals"] = goals_info
+                _log.info(
+                    f"user={user_id} consolidated goal line: "
+                    f"found={consol['found']} kept={consol['kept']}"
+                )
+        except Exception as e:
+            # Consolidation must never break a lint pass; log and move on.
+            _log.warning(f"user={user_id} consolidate_goal_line failed: {e}")
+
         # After all pages done, append the summary to log.md (still holding
         # the lock, so we're safe from concurrent writes).
         _append_log(user_id, result)

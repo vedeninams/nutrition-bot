@@ -124,16 +124,15 @@ async def cmd_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    db.ensure_user(user_id)  # triggers one-time SQL→wiki migration if needed
-    user = db.get_user(user_id) or {}
-    goal = user.get("daily_kcal", 2000)
+    db.ensure_user(user_id)  # triggers one-time SQL→wiki migrations if needed
 
     header = "📋 What I know about you:"
 
     # Pretty-print each populated wiki page for the user.
-    # Order matters: profile first (who you are), then goals (with calorie
-    # goal injected as the first bullet so everything goal-related lives
-    # together), then patterns, then wins.
+    # goals.md is the single source of truth for the calorie goal (and every
+    # other goal) — it already contains the canonical "- **Daily calorie
+    # goal**: N kcal" bullet, so we don't inject anything here. Everything
+    # goal-related lives in one place.
     section_titles = {
         "profile":  "👤 Profile",
         "goals":    "🎯 Goals",
@@ -141,21 +140,11 @@ async def cmd_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "wins":     "🏆 Wins",
     }
     pages = wiki.read_all_pages(user_id)
-    goal_line = f"- Daily calorie goal: {goal} kcal"
 
     parts = [header]
     any_content = False
     for key, title in section_titles.items():
         content = _clean_wiki_for_display(pages.get(key, ""))
-
-        # Goals: always render, with the calorie goal as the first bullet.
-        # Other pages: skip if empty.
-        if key == "goals":
-            body = goal_line if not content else f"{goal_line}\n{content}"
-            parts.append(f"\n{title}\n{body}")
-            any_content = True
-            continue
-
         if not content:
             continue
         parts.append(f"\n{title}\n{content}")
@@ -314,9 +303,8 @@ async def cmd_goal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     args = ctx.args  # list of words after /goal
 
     if not args:
-        # Show current goal
-        user = db.get_user(user_id) or {}
-        goal = user.get("daily_kcal", 2000)
+        # Show current goal — read from goals.md (single source of truth)
+        goal = wiki.get_daily_kcal(user_id, 2000)
         await update.message.reply_text(
             f"🎯 Your daily calorie goal is *{goal} kcal*.\n"
             f"To change it: `/goal 1800`",
@@ -332,7 +320,10 @@ async def cmd_goal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Please give a number between 500 and 10000. E.g. `/goal 1800`")
         return
 
-    db.set_daily_goal(user_id, new_goal)
+    # Write to goals.md under the per-user lock so a concurrent Haiku ingest
+    # on the same page can't race with us.
+    async with wiki.get_lock(user_id):
+        wiki.set_daily_kcal(user_id, new_goal)
     await update.message.reply_text(
         f"✅ Daily goal set to *{new_goal} kcal*.", parse_mode=ParseMode.MARKDOWN
     )
@@ -615,13 +606,13 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if intent == "cmd_goal":
         new_goal = analyzer.extract_goal_from_text(text)
         if new_goal:
-            db.set_daily_goal(user_id, new_goal)
+            async with wiki.get_lock(user_id):
+                wiki.set_daily_kcal(user_id, new_goal)
             await update.message.reply_text(
                 f"✅ Daily goal set to *{new_goal} kcal*.", parse_mode=ParseMode.MARKDOWN
             )
         else:
-            user_data = db.get_user(user_id) or {}
-            current = user_data.get("daily_kcal", 2000)
+            current = wiki.get_daily_kcal(user_id, 2000)
             await update.message.reply_text(
                 f"🎯 Your current daily goal is *{current} kcal*.\n"
                 f"To change it say: \"set my goal to 1800 calories\"",
@@ -665,8 +656,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         # Execute each correction in order, collect summary lines
         reply_lines = []
-        user_data = db.get_user(user_id) or {}
-        goal = user_data.get("daily_kcal", 2000)
+        goal = wiki.get_daily_kcal(user_id, 2000)
 
         for result in valid_results:
             action = result.get("action", "none")

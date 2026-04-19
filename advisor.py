@@ -191,7 +191,7 @@ def log_confirmation(items: list[dict], user_id: int) -> str:
     Groups items by dish_name so multi-ingredient dishes show cleanly.
     """
     user = db.get_user(user_id) or {}
-    goal = user.get("daily_kcal", 2000)
+    goal = wiki.get_daily_kcal(user_id, 2000)
     totals = db.get_today_totals(user_id)
 
     # Group by dish_name
@@ -271,7 +271,7 @@ def daily_morning_summary(user_id: int) -> str:
     Called at 08:00 every day.
     """
     user = db.get_user(user_id) or {}
-    goal = user.get("daily_kcal", 2000)
+    goal = wiki.get_daily_kcal(user_id, 2000)
 
     # Yesterday's meals
     yesterday = (date.today() - timedelta(days=1)).isoformat()
@@ -322,7 +322,7 @@ def weekly_review(user_id: int) -> str:
     Stats header + 3-paragraph AI analysis (this week / longer pattern / recommendation).
     """
     user = db.get_user(user_id) or {}
-    goal = user.get("daily_kcal", 2000)
+    goal = wiki.get_daily_kcal(user_id, 2000)
     month_data = db.get_month_totals(user_id)   # up to 30 days
     week_stats  = db.get_week_stats(user_id)    # activity for past 7 days
 
@@ -412,7 +412,7 @@ def answer_question(user_id: int, question: str) -> str:
     Acts as a knowledgeable personal nutritionist, not just a data lookup.
     """
     user = db.get_user(user_id) or {}
-    goal = user.get("daily_kcal", 2000)
+    goal = wiki.get_daily_kcal(user_id, 2000)
     today_meals = db.get_today_meals(user_id)
     week = db.get_week_totals(user_id)
 
@@ -521,7 +521,7 @@ def day_summary(user_id: int, for_date: str, label: str) -> str:
     label:    display label shown in the header, e.g. "Today" or "Yesterday (April 8th)"
     """
     user = db.get_user(user_id) or {}
-    goal = user.get("daily_kcal", 2000)
+    goal = wiki.get_daily_kcal(user_id, 2000)
     dish_groups = db.get_meals_grouped_for_date(user_id, for_date)
     totals = db.get_totals_for_date(user_id, for_date)
     activity = db.get_daily_stats(user_id, for_date)
@@ -576,7 +576,7 @@ def evening_summary(user_id: int) -> str:
 
     # Gather data for the AI analysis
     user = db.get_user(user_id) or {}
-    goal = user.get("daily_kcal", 2000)
+    goal = wiki.get_daily_kcal(user_id, 2000)
     profile = wiki.read_wiki_for_prompt(user_id)
     today_totals = db.get_today_totals(user_id)
     week_data = db.get_week_totals(user_id)  # last 7 days daily totals

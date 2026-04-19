@@ -148,6 +148,13 @@ def ensure_user(user_id: int):
         "SELECT profile FROM user_profile WHERE user_id = ?", (user_id,)
     ).fetchone()
     sql_profile = row["profile"] if row else ""
+
+    # Read legacy SQL daily calorie goal so the wiki can absorb it on first run.
+    # The column still exists for backward-compat; the canonical source is now goals.md.
+    user_row = conn.execute(
+        "SELECT daily_kcal FROM users WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    sql_kcal = int(user_row["daily_kcal"]) if user_row and user_row["daily_kcal"] else None
     conn.close()
 
     # Ensure the user's long-term memory wiki folder exists (idempotent).
@@ -157,6 +164,10 @@ def ensure_user(user_id: int):
     # One-time migration of legacy SQL profile → wiki profile.md.
     # Marker inside profile.md makes this a no-op after the first call.
     wiki.migrate_sql_profile_if_needed(user_id, sql_profile)
+    # One-time migration of legacy SQL daily_kcal → wiki goals.md.
+    # Marker inside goals.md makes this a no-op after the first call.
+    if sql_kcal:
+        wiki.migrate_sql_goal_if_needed(user_id, sql_kcal)
 
 
 def get_user(user_id: int) -> Optional[dict]:
@@ -169,6 +180,14 @@ def get_user(user_id: int) -> Optional[dict]:
 
 
 def set_daily_goal(user_id: int, kcal: int):
+    """DEPRECATED: the canonical daily calorie goal now lives in goals.md.
+
+    Prefer ``wiki.set_daily_kcal(user_id, kcal)`` inside
+    ``async with wiki.get_lock(user_id):``. This function is kept only so that
+    any lingering callers don't crash; the ``users.daily_kcal`` column is no
+    longer read by the app (see ``ensure_user`` which migrates it once into
+    goals.md, then leaves it alone).
+    """
     ensure_user(user_id)
     conn = get_conn()
     with conn:
