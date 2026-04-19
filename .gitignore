@@ -8,6 +8,7 @@
 
 # Per-user wiki (personal long-term memory — stays on the server, never pushed)
 wiki/
+wiki.test/
 
 # Wiki ingest + lint + contradiction debug logs — local/server only
 ingest.log

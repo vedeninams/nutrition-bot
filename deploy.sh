@@ -73,11 +73,21 @@ ssh "$SERVER" "
 "
 echo ""
 
-# ── 4. Restart the bot ────────────────────────────────────────────────────────
-echo "[4/4] Restarting the bot..."
+# ── 4. Restart the bot(s) ─────────────────────────────────────────────────────
+# Both prod and (if installed) the test instance share the same code — they
+# only differ in which .env file systemd loads — so we restart whichever is
+# enabled. The `list-unit-files --state=enabled` check keeps this a no-op on
+# fresh servers that only have prod.
+echo "[4/4] Restarting the bot(s)..."
 ssh "$SERVER" "
     systemctl daemon-reload
     systemctl restart nutrition-bot
+    if systemctl list-unit-files nutrition-bot-test.service --no-legend | grep -q enabled; then
+        systemctl restart nutrition-bot-test
+        echo 'Restarted: nutrition-bot AND nutrition-bot-test'
+    else
+        echo 'Restarted: nutrition-bot (test instance not installed — skipping)'
+    fi
     sleep 2
     systemctl status nutrition-bot --no-pager
 "
@@ -86,3 +96,4 @@ echo "=== Deploy complete! ==="
 echo ""
 echo "To watch live logs:"
 echo "  ssh $SERVER 'journalctl -u nutrition-bot -f'"
+echo "  ssh $SERVER 'journalctl -u nutrition-bot-test -f'   # if you set up a test env"

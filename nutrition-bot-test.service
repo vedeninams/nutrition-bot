@@ -1,0 +1,23 @@
+[Unit]
+Description=Nutrition Telegram Bot (TEST environment)
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nutrition
+WorkingDirectory=/opt/nutrition-bot
+EnvironmentFile=/opt/nutrition-bot/.env.test
+ExecStart=/opt/nutrition-bot/venv/bin/python telegram_bot.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nutrition-bot-test
+
+# Safety hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
