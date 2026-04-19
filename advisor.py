@@ -181,23 +181,32 @@ def _parse_pcs(dish: str) -> int:
 
 def _dish_stem(dish: str) -> tuple[str, str]:
     """
-    Split a dish string into (stem, unit) by stripping both the "× Npcs"
-    marker and the trailing weight unit.
+    Split a dish string into (stem, unit) by stripping piece-count
+    markers and the trailing weight.
 
-      'Fried egg × 2pcs 120g' -> ('Fried egg', 'g')
-      'Fried egg 60g'         -> ('Fried egg', 'g')
-      'Cooking oil 5ml'       -> ('Cooking oil', 'ml')
-      'König Käse'            -> ('König Käse', '')
+      'Fried egg × 2pcs 120g'      -> ('Fried egg', 'g')
+      'Fried egg 60g'              -> ('Fried egg', 'g')
+      'Fried egg 1pc × 2pcs 120g'  -> ('Fried egg', 'g')  ← defensive
+      'Cooking oil 5ml'            -> ('Cooking oil', 'ml')
+      'König Käse'                 -> ('König Käse', '')
 
     The stem is used as the grouping key so a photo's "Fried egg × 2pcs
     120g" and a correction's "Fried egg 60g" collapse under one key and
     their counts can be summed. Unit is preserved so we can rebuild the
     label with the summed amount.
+
+    Defensive note: the analyzer sometimes hallucinates a lone "1pc" /
+    "2pcs" token with no "×" in front of it — e.g. when it's asked to
+    add one more piece to a row that's already "× 2pcs". We strip those
+    too so the consolidation key still matches the clean row.
     """
-    # Strip "× Npcs" first (can appear anywhere, but usually mid-string)
-    dish = _PCS_RE.sub(' ', dish).strip()
-    # Collapse any double-spaces the substitution left behind.
-    dish = _re.sub(r'\s+', ' ', dish)
+    # Strip "× Npcs" markers first (can appear anywhere).
+    dish = _PCS_RE.sub(' ', dish)
+    # Then strip any LEFTOVER bare "Npcs" / "Npc" tokens (no x/× in
+    # front) — defensive against analyzer quirks.
+    dish = _re.sub(r'\b\d+\s*pcs?\b', ' ', dish, flags=_re.IGNORECASE)
+    # Collapse whitespace the substitutions left behind.
+    dish = _re.sub(r'\s+', ' ', dish).strip()
     # Then strip trailing weight.
     m = _re.search(r'\s*(\d+(?:\.\d+)?)\s*(g|ml)\s*$', dish, _re.IGNORECASE)
     if m:

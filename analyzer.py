@@ -405,8 +405,21 @@ The following action types are available:
    Each item in `items` must be a complete nutrition dict with the same keys as the existing
    log rows: {{"dish_name": ..., "dish": ..., "kcal": ..., "protein_g": ..., "fat_g": ...,
    "carbs_g": ..., "sugar_g": ..., "meal_type": ...}}.
-   COPY numeric values from the matching row(s) in meal history — one existing entry tells
-   you the per-unit calories/macros for this ingredient.
+
+   Numbers must be PER-PIECE (for the single new piece you're adding), not copied totals:
+   - If the existing row is "Fried egg × 2pcs 120g / 180 kcal / 12g protein" (2 eggs worth),
+     one extra egg is 120/2=60g, 180/2=90 kcal, 12/2=6g protein — divide by the N in "× Npcs".
+   - If the existing row is plain "Fried egg 60g / 90 kcal / 6g protein" (1 egg),
+     copy those numbers directly for the new egg.
+
+   The dish STRING for each new item must be CLEAN and per-piece — just the
+   singular name plus the per-piece weight, NO "× Npcs" marker and NO "1pc"
+   text. Examples:
+   - Existing "Fried egg × 2pcs 120g" + add 1 egg → new item's dish = "Fried egg 60g"
+   - Existing "Pancake × 3pcs 150g" + add 2 pancakes → two items, each dish = "Pancake 50g"
+   The display layer adds the "× Npcs" marker back automatically when it merges
+   the rows for display — don't try to format it yourself.
+
    Use when the user says things like:
    - Bot logged 2 fried eggs → "there are three eggs" / "actually three eggs"
      → add ONE more fried egg item (difference = 3 − 2 = 1)
