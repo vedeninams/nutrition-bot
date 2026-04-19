@@ -162,13 +162,18 @@ async def cmd_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 def _clean_wiki_for_display(content: str) -> str:
     """Strip template scaffolding (HTML comments, markdown headings, horizontal
-    rules, empty placeholder, ingest date prefix) from a wiki page so it reads
-    cleanly in Telegram.
+    rules, empty placeholder, ingest date prefix, bold markers) from a wiki
+    page so it reads cleanly in Telegram.
 
     Intentionally strips ALL `# Heading` lines (not just the first) — the bot
     adds its own section title (like "🎯 Goals") before the content, so the
     in-file `# Goals` heading would always duplicate.  Same for `---` style
     horizontal rules, which the Telegram view never needs.
+
+    Telegram is sent without parse_mode (wiki may contain `#` and other chars
+    Telegram's Markdown can't handle), so any `**bold**` or `*italic*` markers
+    would leak through as literal asterisks.  We strip them here — the label
+    itself is distinctive enough without the weight.
     """
     import re
     if not content:
@@ -191,7 +196,23 @@ def _clean_wiki_for_display(content: str) -> str:
         content,
         flags=re.MULTILINE,
     )
-    # Collapse extra blank lines
+    # Strip markdown bold/italic markers — Telegram without parse_mode would
+    # show them as literal asterisks/underscores.  `**bold**`, `__bold__`,
+    # `*italic*`, `_italic_` all become plain text.
+    content = re.sub(r"\*\*(.+?)\*\*", r"\1", content)
+    content = re.sub(r"__(.+?)__", r"\1", content)
+    # Single-asterisk italic: match only when both anchors sit next to non-space
+    # so we don't eat bullet markers (`- ` at line start).
+    content = re.sub(r"(?<!\w)\*(\S.*?\S|\S)\*(?!\w)", r"\1", content)
+    # Single-underscore italic: same word-boundary guard so we don't eat
+    # underscores inside identifiers like `user_id`.
+    content = re.sub(r"(?<!\w)_(\S.*?\S|\S)_(?!\w)", r"\1", content)
+    # Collapse blank lines BETWEEN consecutive bullets so the list reads tight.
+    # `- foo\n\n- bar`  →  `- foo\n- bar`.  Runs repeatedly until stable.
+    _bullet_blank_re = re.compile(r"(^\s*[-*•].*)\n\s*\n(\s*[-*•])", re.MULTILINE)
+    while _bullet_blank_re.search(content):
+        content = _bullet_blank_re.sub(r"\1\n\2", content)
+    # Collapse any remaining 3+ blank-line runs down to one blank line.
     content = re.sub(r"\n{3,}", "\n\n", content)
     return content.strip()
 
