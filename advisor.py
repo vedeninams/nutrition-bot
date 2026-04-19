@@ -122,7 +122,10 @@ def _fmt_meal(m: dict) -> str:
     emoji = _food_emoji(m.get("dish", ""))
     protein = m.get("protein_g", 0)
     grams = _parse_grams(m.get("dish", ""))
-    grams_str = f" - {grams:.0f}g" if grams > 0 else ""
+    # Always surface a unit — if the dish string has no grams/ml encoded
+    # (mostly legacy label-scan rows), fall back to "(serving)" so the
+    # user always sees SOMETHING where the weight would be.
+    grams_str = f" - {grams:.0f}g" if grams > 0 else " - (serving)"
     return f"{emoji} {m['dish']}{grams_str} - {m['kcal']:.0f} kcal - {protein:.0f}g protein"
 
 def _fmt_totals(totals: dict, goal: int) -> str:
@@ -291,17 +294,17 @@ def _fmt_dish_group(items: list[dict]) -> str:
     total_kcal = sum(i.get("kcal", 0) for i in items)
     total_protein = sum(i.get("protein_g", 0) for i in items)
     total_grams = sum(_parse_grams(i.get("dish", "")) for i in items)
-    grams_str = f" - {total_grams:.0f}g" if total_grams > 0 else ""
+    grams_str = f" - {total_grams:.0f}g" if total_grams > 0 else " - (serving)"
 
     if len(items) == 1:
         emoji = _food_emoji(dish_name)
-        stats = f"{total_grams:.0f}g - " if total_grams > 0 else ""
+        stats = f"{total_grams:.0f}g - " if total_grams > 0 else "(serving) - "
         return (
             f"{emoji} *{dish_name}*\n{stats}{total_kcal:.0f} kcal - {total_protein:.0f}g protein"
         )
     else:
         emoji = _food_emoji(dish_name)
-        stats = f"{total_grams:.0f}g - " if total_grams > 0 else ""
+        stats = f"{total_grams:.0f}g - " if total_grams > 0 else "(serving) - "
         header = f"{emoji} *{dish_name}*\n{stats}{total_kcal:.0f} kcal - {total_protein:.0f}g protein"
         # Consolidate identical ingredients — e.g. three "Fried egg 60g"
         # rows collapse to one "Fried egg 180g" row — so corrections that
@@ -341,8 +344,8 @@ def log_confirmation(items: list[dict], user_id: int) -> str:
         i = items[0]
         emoji = _food_emoji(i.get("dish_name") or i.get("dish", ""))
         grams = _parse_grams(i.get("dish", ""))
-        grams_str = f" - {grams:.0f}g" if grams > 0 else ""
-        stats = f"{grams:.0f}g - " if grams > 0 else ""
+        grams_str = f" - {grams:.0f}g" if grams > 0 else " - (serving)"
+        stats = f"{grams:.0f}g - " if grams > 0 else "(serving) - "
         item_lines = (
             f"✅ Logged: {emoji} *{i.get('dish_name') or i.get('dish', '?')}*\n"
             f"{stats}{i.get('kcal', 0):.0f} kcal - {i.get('protein_g', 0):.0f}g protein"
@@ -356,7 +359,7 @@ def log_confirmation(items: list[dict], user_id: int) -> str:
         g = list(groups.values())[0]
         emoji = _food_emoji(dish_name)
         total_grams = sum(_parse_grams(i.get("dish", "")) for i in g)
-        grams_str = f" - {total_grams:.0f}g" if total_grams > 0 else ""
+        grams_str = f" - {total_grams:.0f}g" if total_grams > 0 else " - (serving)"
         display_g = _consolidate_items(g)
         ingredient_lines = "\n".join(
             f"  · {i.get('dish', '?')} - {i.get('kcal', 0):.0f} kcal - {i.get('protein_g', 0):.0f}g protein"
@@ -371,7 +374,7 @@ def log_confirmation(items: list[dict], user_id: int) -> str:
     else:
         # Multiple dishes
         total_grams = sum(_parse_grams(i.get("dish", "")) for i in items)
-        grams_str = f" - {total_grams:.0f}g" if total_grams > 0 else ""
+        grams_str = f" - {total_grams:.0f}g" if total_grams > 0 else " - (serving)"
         item_lines = (
             f"✅ Logged {len(groups)} dishes\n"
             f"{len(items)} items{grams_str} - {total_kcal:.0f} kcal - {total_protein:.0f}g protein:\n{dish_blocks}"
