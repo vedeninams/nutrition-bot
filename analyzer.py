@@ -340,6 +340,35 @@ The user may request ONE or MULTIPLE corrections in a single message (e.g. "chan
 You have the recent meal history shown below. Each item has a dish_name (the whole dish)
 and a dish (the individual ingredient).
 
+USING CONVERSATION CONTEXT (IMPORTANT):
+You receive a short conversation history above — prior user turns and bot
+replies, including compact summaries of what a just-sent photo logged
+(e.g. "[Photo logged (photo): Natural Yoghurt 300g (204 kcal) — total 204 kcal]"
+or "[Photo logged (photo): Fried egg × 2pcs 120g (180 kcal), Avocado 80g
+(128 kcal) — total 308 kcal]"). USE that context — the user's correction
+is almost always about what was JUST logged in the previous turn.
+
+Terse corrections without an explicit dish name are the common case. Read
+the conversation to find the referent; do NOT return action=none just
+because the latest message is short.
+
+Examples (each follows a photo log in the conversation):
+  bot logged Natural Yoghurt 300g → "Change to 400g"
+    → scale_dish_grams, dish_name="Natural Yoghurt", target_grams=400
+  bot logged Natural Yoghurt 300g → "make it 250g"
+    → scale_dish_grams, dish_name="Natural Yoghurt", target_grams=250
+  bot logged Natural Yoghurt 300g → "remove it"
+    → delete (or delete_many with the matching id from history)
+  bot logged Natural Yoghurt 300g → "that was breakfast"
+    → update_many with meal_type="breakfast" for that dish_name
+  bot logged 2 fried eggs → "three eggs"
+    → add_items for one more egg
+  bot logged an Udon Bowl (6 items) → "remove that"
+    → delete_many for all ids of that dish_name
+
+Always cross-reference the conversation with the meal history JSON below
+to pick the correct IDs and dish_name.
+
 {batch_section}
 
 Return a JSON ARRAY — one object per correction, even if there is only one.
