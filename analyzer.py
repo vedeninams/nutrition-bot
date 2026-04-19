@@ -340,17 +340,19 @@ The user may request ONE or MULTIPLE corrections in a single message (e.g. "chan
 You have the recent meal history shown below. Each item has a dish_name (the whole dish)
 and a dish (the individual ingredient).
 
-USING CONVERSATION CONTEXT (IMPORTANT):
-You receive a short conversation history above — prior user turns and bot
-replies, including compact summaries of what a just-sent photo logged
-(e.g. "[Photo logged (photo): Natural Yoghurt 300g (204 kcal) — total 204 kcal]"
-or "[Photo logged (photo): Fried egg × 2pcs 120g (180 kcal), Avocado 80g
-(128 kcal) — total 308 kcal]"). USE that context — the user's correction
-is almost always about what was JUST logged in the previous turn.
+USING CONVERSATION CONTEXT (DEFAULT POSTURE):
+You receive today's short-term conversation history above — prior user
+turns and bot replies, including compact summaries of what a just-sent
+photo logged (e.g. "[Photo logged (photo): Natural Yoghurt 300g (204 kcal)
+— total 204 kcal]" or "[Photo logged (photo): Fried egg × 2pcs 120g
+(180 kcal), Avocado 80g (128 kcal) — total 308 kcal]").
 
-Terse corrections without an explicit dish name are the common case. Read
-the conversation to find the referent; do NOT return action=none just
-because the latest message is short.
+READ IT BEFORE RESOLVING. The user's correction is almost always about
+what was just logged in the previous turn. Terse corrections with no
+explicit dish name ("400g", "make it three", "remove it", "that was
+breakfast") are the common case — the referent lives in the conversation,
+not in the latest message. Do NOT return action=none just because the
+latest message is short; find the referent in history.
 
 Examples (each follows a photo log in the conversation):
   bot logged Natural Yoghurt 300g → "Change to 400g"
@@ -546,42 +548,58 @@ def resolve_correction(
 INTENT_SYSTEM_PROMPT = """You are a router for a nutrition tracking bot.
 Classify the user's LATEST message into exactly one of these intents.
 
-USING CONVERSATION CONTEXT:
-You may receive a short conversation history above the latest message (prior
-user turns and bot replies, including compact summaries of what a just-sent
-photo logged — e.g. "[Photo logged (photo): Fried egg 60g (90 kcal), Fried
-egg 60g (90 kcal), ...]"). USE that context — the same words mean different
-things depending on what just happened. In particular:
+USING CONVERSATION CONTEXT (DEFAULT POSTURE):
+You receive the short-term conversation history above the latest message —
+today's rolling window of prior user turns and bot replies, including compact
+summaries of what a just-sent photo logged (e.g. "[Photo logged (photo):
+Natural Yoghurt 300g (204 kcal) — total 204 kcal]").
 
-- If the bot just logged food and the user's next message factually contradicts
-  or adjusts that log (quantity, count, meal type, name, or says "remove X") —
-  classify as correction, NOT a new log.
-  Examples (each follows a "✅ Logged ..." reply):
-    bot logged 2 eggs → "there are three eggs"       → correction
+READ IT BEFORE CLASSIFYING. The latest message is almost always a
+continuation of the ongoing dialogue, not a fresh thought. Short or terse
+messages, pronouns ("it", "that", "those"), numeric picks ("option 1",
+"the first one", "#2"), casual agreement ("sounds great", "ok let's do
+that"), and bare adjustments ("400g", "make it three") only make sense
+relative to the previous turns. Classify the CONTINUED meaning.
+
+Only treat the message as a brand-new, standalone thought when the recent
+history truly has nothing to tie it to.
+
+Common patterns this produces (illustrative, not exhaustive — use the same
+principle for any other follow-up you see):
+
+- Bot just LOGGED food → the user's adjustment/contradiction/removal of
+  that log is a correction, not a new log.
+    bot logged 2 eggs → "there are three eggs"        → correction
     bot logged 2 eggs → "actually three eggs"         → correction
     bot logged avocado 80g → "it was a whole avocado" → correction
     bot logged rice 100g → "150g rice"                → correction
+    bot logged Natural Yoghurt 300g → "Change to 400g"→ correction
     bot logged breakfast → "that was lunch"           → correction
     bot logged dish with 6 items → "remove the hummus"→ correction
-- If the bot just OFFERED suggestions, options, or a list of meal ideas
-  (dinner ideas, snack options, recipes, "Option 1 / Option 2", etc.) and
-  the user responds by picking one, asking for a recipe, or drilling in on
-  one of them — classify as question. These are follow-ups on the advice,
-  not new meal logs. Food-sounding words in this follow-up are referring
-  to the bot's suggestion, not something the user ate.
-  Examples (each follows a multi-option advice reply):
+
+- Bot just OFFERED suggestions / options / meal ideas / recipes / a list →
+  the user's pick or drill-in is a question (a follow-up on the advice),
+  not a meal log. Food words in these follow-ups refer to the suggestion,
+  not something the user ate.
     bot offered 3 dinner options → "sounds great, recipe for option 1?"   → question
     bot offered 3 dinner options → "I like option 2, tell me how to cook" → question
     bot offered 3 dinner options → "the chicken one, how do I make it?"   → question
     bot offered snack ideas → "first one please"                          → question
     bot offered protein ideas → "how much chicken would that be?"         → question
-  The word "recipe" / "recipie" / "how do I cook/make" is a strong signal
-  for question regardless of context — the user is asking how to prepare
-  something, not logging that they ate it.
-- If there is NO recent log (or the recent log is unrelated), a food
-  description starting a new thought is log_text.
-    (no recent log) → "I had oatmeal with banana"     → log_text
-    (no recent log) → "three eggs for breakfast"      → log_text
+
+- Bot just ANSWERED a question → the user's follow-up question is still a
+  question (same thread, more depth), even if it's terse.
+    bot said "you're low on protein" → "by how much?"           → question
+    bot explained TDEE → "so what should I aim for?"            → question
+    bot: "add 20g more protein" → "where should I get it from?" → question
+
+- Explicit recipe / cooking requests are always question, regardless of
+  context ("give me a recipe for X", "how do I cook X?", "recipie for ...").
+
+- If the recent history is genuinely unrelated (or empty) and the user
+  describes food as a fresh thought, it's log_text.
+    (no recent log / unrelated) → "I had oatmeal with banana"  → log_text
+    (no recent log / unrelated) → "three eggs for breakfast"   → log_text
 
 Intents:
 
