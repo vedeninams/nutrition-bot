@@ -7,6 +7,7 @@ Every other module imports from here — nothing else touches the DB directly.
 
 import sqlite3
 import os
+import re as _re
 from datetime import datetime, date, timedelta
 from typing import Optional
 
@@ -437,27 +438,87 @@ def delete_meal(meal_id: int) -> bool:
     return cur.rowcount > 0
 
 
+_WEIGHT_RE = _re.compile(r'(\d+(?:\.\d+)?)\s*(g|ml)\b', _re.IGNORECASE)
+
+
+def _rescale_weight_in_dish(dish: str, factor: float) -> str:
+    """Scale the LAST weight token (Ng or Nml) in a dish string by factor.
+
+      'Yogurt 300g'             + 1.333 → 'Yogurt 400g'
+      'Fried egg × 2pcs 120g'   + 1.5   → 'Fried egg × 2pcs 180g'
+      'Broth 200ml'             + 0.5   → 'Broth 100ml'
+      'König Käse'              + 2.0   → 'König Käse'  (no weight → no-op)
+
+    Only the last match is rewritten. Ingredient lines carry at most one
+    weight; being explicit avoids touching any earlier number that might
+    look like a weight (e.g. the '2' in '× 2pcs' — belt-and-suspenders,
+    since 'pcs' is excluded by the regex already).
+    """
+    matches = list(_WEIGHT_RE.finditer(dish))
+    if not matches:
+        return dish
+    m = matches[-1]
+    old_val = float(m.group(1))
+    unit = m.group(2)
+    new_val = round(old_val * factor)
+    return dish[:m.start()] + f"{new_val}{unit}" + dish[m.end():]
+
+
 def scale_dish_items(user_id: int, dish_name: str, factor: float) -> int:
     """
-    Multiply all macro values of every non-deleted item in this dish by factor.
-    E.g. factor=0.5 → user ate half the dish.
+    Scale every non-deleted item of this dish by `factor`:
+      • macro columns (kcal, protein_g, fat_g, carbs_g, sugar_g)
+      • the weight token inside the `dish` text ("Yogurt 300g" → "Yogurt 400g")
+
+    Both must move together or /today shows a mismatched row (old grams,
+    new kcal) — which is exactly the "300g yogurt, 272 kcal" glitch that
+    motivated this change. All writes happen in one transaction.
+
+    E.g. factor=0.5 → user ate half the dish. factor=1.333 → scaled up
+    from 300g to 400g.
+
+    Case-insensitive dish_name match, so "udon noodle bowl" still finds
+    "Udon Noodle Bowl".
+
     Returns the number of rows updated.
-    Uses case-insensitive matching so "udon noodle bowl" matches "Udon Noodle Bowl".
     """
     conn = get_conn()
+
+    # Pull the rows we're about to scale so we can rewrite each dish
+    # string individually — the weight can differ per ingredient.
+    rows = conn.execute(
+        """SELECT id, dish FROM meals
+           WHERE user_id = ?
+             AND LOWER(dish_name) = LOWER(?)
+             AND confidence != 'deleted'""",
+        (user_id, dish_name),
+    ).fetchall()
+
+    dish_updates = [
+        (_rescale_weight_in_dish(r["dish"] or "", factor), r["id"])
+        for r in rows
+    ]
+
     with conn:
-        cur = conn.execute(
+        conn.execute(
             """UPDATE meals SET
                    kcal      = ROUND(kcal      * ?, 1),
                    protein_g = ROUND(protein_g * ?, 1),
                    fat_g     = ROUND(fat_g     * ?, 1),
                    carbs_g   = ROUND(carbs_g   * ?, 1),
                    sugar_g   = ROUND(sugar_g   * ?, 1)
-               WHERE user_id = ? AND LOWER(dish_name) = LOWER(?) AND confidence != 'deleted'""",
-            (factor, factor, factor, factor, factor, user_id, dish_name)
+               WHERE user_id = ?
+                 AND LOWER(dish_name) = LOWER(?)
+                 AND confidence != 'deleted'""",
+            (factor, factor, factor, factor, factor, user_id, dish_name),
         )
+        if dish_updates:
+            conn.executemany(
+                "UPDATE meals SET dish = ? WHERE id = ?",
+                dish_updates,
+            )
     conn.close()
-    return cur.rowcount
+    return len(dish_updates)
 
 
 def clear_today(user_id: int) -> int:
