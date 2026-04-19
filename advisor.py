@@ -1021,41 +1021,82 @@ async def ingest_interaction(
                 f"reason={reasoning!r} n_updates={len(updates)}"
             )
 
+            applied_count = 0
             for upd in updates:
                 try:
                     _apply_wiki_update(user_id, upd)
                     _ingest_logger.info(f"user={user_id} APPLIED {upd}")
+                    applied_count += 1
                 except Exception as e:
                     _ingest_logger.error(f"user={user_id} APPLY_FAIL upd={upd} err={e!r}")
 
     except Exception as e:
         _ingest_logger.error(f"user={user_id} INGEST_FAIL err={e!r}")
+        return
+
+    # Schedule a background lint pass OUTSIDE the lock if anything actually
+    # changed.  Lint holds the same per-user wiki lock itself, so firing it
+    # from inside this function's lock would deadlock.  This is fire-and-forget
+    # by design — the user-facing reply has already been sent, so the lint
+    # just tidies the wiki in the background without blocking anything.
+    if applied_count > 0:
+        _schedule_post_change_lint(user_id)
 
 
-def _consolidate_goal_line_if_changed(user_id: int) -> None:
+# ─────────────────────────────────────────────────────────────────────────────
+# Post-change lint scheduler
+#
+# After every ingest that actually wrote something to the wiki, we kick off a
+# background lint pass over profile/goals/patterns/wins (log.md is excluded).
+# Replaces the old "only consolidate goals.md" fix-up — now any page gets the
+# same tidy treatment right after it changes, not just once a week.
+#
+# Debounce: if a lint for this user is already pending/running, don't stack
+# another one. The currently-running lint already sees the lock-serialized
+# latest state of the wiki, so a second concurrent pass is just duplicate work.
+# After the first lint finishes, the next ingest will trigger a fresh one if
+# there are new changes to clean up.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_pending_lints: set[int] = set()
+
+
+def _schedule_post_change_lint(user_id: int) -> None:
     """
-    After any write to goals.md, collapse duplicate calorie-goal bullets to
-    one canonical line (later value wins).  Same logic /lint runs weekly,
-    just triggered on every ingest write so the duplication can't surface
-    in /profile.  Idempotent: does nothing when the page already has 0 or 1
-    calorie-goal lines.  Logs when it actually rewrote anything so the
-    collapse is visible in ingest.log.
+    Fire off a background lint pass for this user.  Skips if one is already
+    pending for the same user (debounce: one lint per user at a time).
+    Errors inside the lint are swallowed so a bad lint can't break anything.
+    """
+    if user_id in _pending_lints:
+        _ingest_logger.info(f"user={user_id} post-change lint already pending, skipping")
+        return
+    try:
+        loop = _asyncio.get_event_loop()
+    except RuntimeError:
+        _ingest_logger.error(
+            "_schedule_post_change_lint called outside event loop; skipping"
+        )
+        return
+    _pending_lints.add(user_id)
+    task = loop.create_task(_run_post_change_lint(user_id))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+async def _run_post_change_lint(user_id: int) -> None:
+    """
+    Thin wrapper around ``lint.lint_user_wiki`` that cleans up
+    ``_pending_lints`` when the pass ends, whether it succeeded or raised.
+    Imported lazily to avoid a circular import at module load time.
     """
     try:
-        result = wiki.consolidate_goal_line(user_id)
+        import lint  # local import keeps advisor<->lint decoupled at load time
+        result = await lint.lint_user_wiki(user_id)
+        _ingest_logger.info(f"user={user_id} post-change lint done: {result}")
     except Exception as e:
-        _ingest_logger.error(f"user={user_id} consolidate_goal_line FAIL err={e!r}")
-        return
-    if result.get("rewrote"):
-        _ingest_logger.info(
-            f"user={user_id} consolidated goals.md calorie line: "
-            f"found={result.get('found')} kept={result.get('kept')}"
-        )
-        wiki.append_log(
-            user_id,
-            "Consolidated duplicate calorie-goal lines in goals.md",
-            f"kept: {result.get('kept')} kcal (found {result.get('found')} lines)",
-        )
+        _ingest_logger.error(f"user={user_id} post-change lint FAIL err={e!r}")
+    finally:
+        _pending_lints.discard(user_id)
 
 
 def _apply_wiki_update(user_id: int, upd: dict) -> None:
@@ -1076,9 +1117,12 @@ def _apply_wiki_update(user_id: int, upd: dict) -> None:
     remove_line / replace_line are surgical single-bullet operations
     driven by the user's own request, not global passes.
 
-    After any change to goals.md we auto-consolidate the calorie-goal
-    line so duplicate "Daily calorie goal: N kcal" bullets can't
-    accumulate — one canonical bullet always wins, later value kept.
+    After this function returns (and the wiki lock is released),
+    ``ingest_interaction`` schedules a background lint pass over every
+    lintable page — so dedup, superseded facts, stale time-bounded
+    goals, and the calorie-goal canonical-line fix-up all happen
+    automatically within a second or two of each change, not just
+    on the weekly cron.
     """
     page = upd.get("page", "")
     # Be defensive: Haiku sometimes emits "goals.md" instead of "goals"
@@ -1117,13 +1161,9 @@ def _apply_wiki_update(user_id: int, upd: dict) -> None:
         # NEVER rewrite past entries, they only add new ones.
         wiki.append_log(user_id, f"Added to {page}.md", content)
 
-        # Goals.md specifically can accumulate duplicate calorie-goal lines
-        # when Haiku appends one from natural conversation ("I want 2000
-        # kcal/day") while a canonical bullet is already there from /goal.
-        # The /lint pass already collapses them; do it on every write too
-        # so the duplication never surfaces in /profile.  Idempotent.
-        if page == "goals":
-            _consolidate_goal_line_if_changed(user_id)
+        # Post-change tidying (dedup, superseded facts, stale time-bounded
+        # goals, calorie-line consolidation) is handled by the background lint
+        # pass scheduled from ingest_interaction after this function returns.
 
     elif action == "remove_line" and page in ("patterns", "profile", "goals", "wins"):
         # Delete one (or more) existing bullets from a page based on a
@@ -1188,9 +1228,6 @@ def _apply_wiki_update(user_id: int, upd: dict) -> None:
         )
         wiki.append_log(user_id, summary, "\n".join(removed_lines))
 
-        if page == "goals":
-            _consolidate_goal_line_if_changed(user_id)
-
     elif action == "replace_line" and page in ("patterns", "profile", "goals", "wins"):
         # Surgical in-place rewrite of a single bullet.  Finds a bullet by
         # case-insensitive substring on `target`, then swaps its content
@@ -1250,9 +1287,6 @@ def _apply_wiki_update(user_id: int, upd: dict) -> None:
             f"Rewrote a line in {page}.md",
             f"from: {old_line}\nto:   {normalized}",
         )
-
-        if page == "goals":
-            _consolidate_goal_line_if_changed(user_id)
 
     elif action == "log_entry" and page == "log":
         summary = (upd.get("summary") or "").strip()

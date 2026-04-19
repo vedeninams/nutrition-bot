@@ -432,6 +432,17 @@ async def lint_user_wiki(user_id: int) -> dict:
 
         # After all pages done, append the summary to log.md (still holding
         # the lock, so we're safe from concurrent writes).
-        _append_log(user_id, result)
+        #
+        # Skip the log entry when NO page was rewritten — since lint now runs
+        # in the background after every ingest change, a page-by-page "no
+        # change" summary after every user message would flood log.md with
+        # noise.  The rule is simple: log.md gets an entry only when lint
+        # actually did something.  Individual appends/removes already left
+        # their own breadcrumbs (from ``_apply_wiki_update``), so when lint
+        # is a no-op the audit trail is still complete.
+        if any(info.get("rewritten") for info in result.values()):
+            _append_log(user_id, result)
+        else:
+            _log.info(f"user={user_id} lint pass no-op, skipping log.md entry")
 
     return result
