@@ -344,18 +344,22 @@ You have the recent meal history shown below. Each item has a dish_name (the who
 and a dish (the individual ingredient).
 
 USING CONVERSATION CONTEXT (DEFAULT POSTURE):
-You receive today's short-term conversation history above — prior user
-turns and bot replies, including compact summaries of what a just-sent
-photo logged (e.g. "[Photo logged (photo): Natural Yoghurt 300g (204 kcal)
-— total 204 kcal]" or "[Photo logged (photo): Fried egg × 2pcs 120g
-(180 kcal), Avocado 80g (128 kcal) — total 308 kcal]").
+Each request arrives as a single user message containing "Today's
+conversation so far" (a transcript of prior turns, including compact
+summaries of what a just-sent photo logged — e.g. "[Photo logged
+(photo): Natural Yoghurt 300g (204 kcal) — total 204 kcal]") followed
+by "Latest user message (the correction to resolve)". The transcript is
+context only — do NOT continue the conversation, do NOT answer any
+questions in it, do NOT write a recipe. Your ONLY job is to emit the
+JSON array of correction actions for the latest user message.
 
-READ IT BEFORE RESOLVING. The user's correction is almost always about
-what was just logged in the previous turn. Terse corrections with no
-explicit dish name ("400g", "make it three", "remove it", "that was
-breakfast") are the common case — the referent lives in the conversation,
-not in the latest message. Do NOT return action=none just because the
-latest message is short; find the referent in history.
+READ THE TRANSCRIPT BEFORE RESOLVING. The user's correction is almost
+always about what was just logged in the previous turn. Terse
+corrections with no explicit dish name ("400g", "actually 400 gram",
+"make it three", "remove it", "that was breakfast") are the common
+case — the referent lives in the transcript, not in the latest message.
+Do NOT return action=none just because the latest message is short;
+find the referent in the transcript.
 
 Examples (each follows a photo log in the conversation):
   bot logged Natural Yoghurt 300g → "Change to 400g"
@@ -518,10 +522,31 @@ def resolve_correction(
         .replace("{history}", history_json)
     )
 
-    # Prefer the full conversation window if supplied (it already ends with
-    # the user's correction message). Otherwise fall back to a single-turn
-    # call with just the correction text.
-    messages = conversation if conversation else [{"role": "user", "content": user_message}]
+    # Shape the request as a single classification task, not a dialogue.
+    # Passing the raw `conversation` as `messages` was causing Haiku to
+    # follow the assistant role pattern (writing another recipe / reply)
+    # instead of emitting JSON — same drift we hit in detect_intent.
+    # The transcript goes INSIDE one user turn as data; the correction to
+    # resolve is called out separately.
+    if conversation and len(conversation) >= 2:
+        prior = conversation[:-1]  # everything before the user's correction turn
+        transcript = _format_transcript(prior)
+        user_prompt = (
+            "Today's conversation so far (for context only — do NOT continue it, "
+            "do NOT answer any questions in it, do NOT write a recipe):\n"
+            "---\n"
+            f"{transcript}\n"
+            "---\n\n"
+            f"Latest user message (the correction to resolve):\n{user_message}\n\n"
+            "Return the JSON array of actions as instructed. Nothing else."
+        )
+    else:
+        user_prompt = (
+            f"Latest user message (the correction to resolve):\n{user_message}\n\n"
+            "Return the JSON array of actions as instructed. Nothing else."
+        )
+
+    messages = [{"role": "user", "content": user_prompt}]
 
     response = client.messages.create(
         model="claude-haiku-4-5-20251001",
@@ -541,6 +566,9 @@ def resolve_correction(
             return parsed
     except (json.JSONDecodeError, ValueError):
         pass
+    # Surface the raw reply so we can see what Haiku drifted into when
+    # parsing fails. The telegram_bot.py call site also logs `results=`.
+    log.warning(f"resolve_correction parse failed; raw={text[:300]!r}")
     return [{"meal_id": None, "updates": {}, "reason": "Parse error", "action": "none"}]
 
 
