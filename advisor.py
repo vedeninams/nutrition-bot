@@ -299,8 +299,14 @@ def _fmt_dish_group(items: list[dict]) -> str:
     if len(items) == 1:
         emoji = _food_emoji(dish_name)
         stats = f"{total_grams:.0f}g - " if total_grams > 0 else "(serving) - "
+        # Surface the "× Npcs" count from the dish string so a standalone
+        # "Boiled eggs" row shows "Boiled eggs × 3pcs" in the header
+        # instead of just "Boiled eggs" (which loses the count). dish_name
+        # alone often doesn't carry the count — only the dish string does.
+        pcs = _parse_pcs(items[0].get("dish", "") or "")
+        pcs_str = f" × {pcs}pcs" if pcs > 1 else ""
         return (
-            f"{emoji} *{dish_name}*\n{stats}{total_kcal:.0f} kcal - {total_protein:.0f}g protein"
+            f"{emoji} *{dish_name}*{pcs_str}\n{stats}{total_kcal:.0f} kcal - {total_protein:.0f}g protein"
         )
     else:
         emoji = _food_emoji(dish_name)
@@ -346,8 +352,12 @@ def log_confirmation(items: list[dict], user_id: int) -> str:
         grams = _parse_grams(i.get("dish", ""))
         grams_str = f" - {grams:.0f}g" if grams > 0 else " - (serving)"
         stats = f"{grams:.0f}g - " if grams > 0 else "(serving) - "
+        # Surface "× Npcs" from the dish string (the count lives there,
+        # not in dish_name). Matches _fmt_dish_group's single-item branch.
+        pcs = _parse_pcs(i.get("dish", "") or "")
+        pcs_str = f" × {pcs}pcs" if pcs > 1 else ""
         item_lines = (
-            f"✅ Logged: {emoji} *{i.get('dish_name') or i.get('dish', '?')}*\n"
+            f"✅ Logged: {emoji} *{i.get('dish_name') or i.get('dish', '?')}*{pcs_str}\n"
             f"{stats}{i.get('kcal', 0):.0f} kcal - {i.get('protein_g', 0):.0f}g protein"
         )
     elif len(groups) == 1:
