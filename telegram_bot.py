@@ -773,11 +773,21 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # resolve_correction now returns a LIST — one action per requested change
         results = analyzer.resolve_correction(text, recent, last_batch=last_batch, conversation=history)
 
+        # Diagnostic logging — when the resolver keeps returning 'none' we want
+        # to see exactly what Haiku was handed and what it said. Kept terse so
+        # journalctl stays readable.
+        log.info(
+            f"correction user={user_id} text={text!r} "
+            f"history_len={len(history) if history else 0} "
+            f"recent_count={len(recent)} last_batch_count={len(last_batch) if last_batch else 0} "
+            f"results={results}"
+        )
+
         # Filter out "none" actions before processing
         valid_results = [r for r in results if r.get("action", "none") != "none"]
 
         if not valid_results:
-            await _send(update, 
+            await _send(update,
                 "🤔 I'm not sure which meal you want to change. "
                 "Try being more specific, e.g. \"The feta — it was 70g not 80g. Also remove the hummus.\""
             )
