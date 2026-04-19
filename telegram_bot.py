@@ -110,6 +110,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/goal — set your daily calorie goal\n"
         "/profile — see everything I know about you\n"
         "/lint — tidy up my notes about you (dedup + drop stale)\n"
+        "/reset\\_today — wipe today's meals, stats, conversation + today's wiki lines (for testing)\n"
         "/help — this message",
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -334,11 +335,55 @@ async def cmd_clear_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     removed = db.clear_today(user_id)
     if removed:
-        await _send(update, 
+        await _send(update,
             f"🗑 Cleared {removed} item{'s' if removed != 1 else ''} logged today. Fresh start!",
         )
     else:
         await _send(update, "Nothing logged today to clear.")
+
+
+async def cmd_reset_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Full test-cleanup: wipe everything written today for this user.
+
+    Nukes (all scoped to TODAY):
+      - meals (HARD delete, not soft — so row counts go back to zero)
+      - daily_stats (steps / weight / workouts)
+      - conversation_messages (short-term memory from today)
+      - [YYYY-MM-DD]-stamped lines in every wiki page (profile, goals,
+        patterns, wins, log)
+
+    Leaves intact: historical data from prior days, long-term wiki facts
+    that were stamped on earlier dates.
+    """
+    user_id = update.effective_user.id
+    db.ensure_user(user_id)
+
+    # Hold the wiki lock for the page edits so a parallel ingest from the
+    # last test message can't race us.
+    async with wiki.get_lock(user_id):
+        meals_removed = db.delete_today_meals(user_id)
+        stats_removed = db.delete_today_stats(user_id)
+        conv_removed = db.delete_today_conversation(user_id)
+        try:
+            wiki_stripped = wiki.strip_today_lines(user_id)
+        except Exception as e:
+            log.warning(f"strip_today_lines failed: {e}")
+            wiki_stripped = {}
+
+    lines = ["🧹 *Reset today* — cleared test data:"]
+    lines.append(f"• Meals: {meals_removed}")
+    lines.append(f"• Daily stats: {stats_removed}")
+    lines.append(f"• Conversation turns: {conv_removed}")
+    if wiki_stripped:
+        total = sum(wiki_stripped.values())
+        per_page = ", ".join(f"{k}: {v}" for k, v in wiki_stripped.items())
+        lines.append(f"• Wiki lines stamped today: {total} ({per_page})")
+    else:
+        lines.append("• Wiki lines stamped today: 0")
+    lines.append("")
+    lines.append("History from prior days untouched.")
+
+    await _send(update, "\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 
 async def cmd_goal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1062,6 +1107,7 @@ def main():
     app.add_handler(CommandHandler("profile", cmd_profile))
     app.add_handler(CommandHandler("lint", cmd_lint))
     app.add_handler(CommandHandler("clear_today", cmd_clear_today))
+    app.add_handler(CommandHandler("reset_today", cmd_reset_today))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

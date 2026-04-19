@@ -1093,3 +1093,57 @@ def purge_conversation_older_than(days: int = 14) -> int:
         deleted = cur.rowcount or 0
     conn.close()
     return deleted
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test-cleanup helpers — wipe everything that was written today.
+#
+# Meant for the /reset_today command: when we're actively testing the bot,
+# the day's meal log / stats / conversation get cluttered with fake data.
+# These helpers return row counts so the caller can report what it nuked.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def delete_today_meals(user_id: int) -> int:
+    """HARD-delete every meal row logged today (server calendar day). Unlike
+    delete_meal (which marks as 'deleted' for the audit trail), this actually
+    removes the rows so /today totals start clean. Returns rows deleted."""
+    today = date.today().isoformat()
+    conn = get_conn()
+    with conn:
+        cur = conn.execute(
+            "DELETE FROM meals WHERE user_id = ? AND date(logged_at) = ?",
+            (user_id, today),
+        )
+        deleted = cur.rowcount or 0
+    conn.close()
+    return deleted
+
+
+def delete_today_stats(user_id: int) -> int:
+    """Wipe today's daily_stats row (steps / weight / workouts). Returns
+    rows deleted (0 or 1)."""
+    today = date.today().isoformat()
+    conn = get_conn()
+    with conn:
+        cur = conn.execute(
+            "DELETE FROM daily_stats WHERE user_id = ? AND date = ?",
+            (user_id, today),
+        )
+        deleted = cur.rowcount or 0
+    conn.close()
+    return deleted
+
+
+def delete_today_conversation(user_id: int) -> int:
+    """Wipe every conversation_messages row from today for this user.
+    Returns rows deleted."""
+    today = date.today().isoformat()
+    conn = get_conn()
+    with conn:
+        cur = conn.execute(
+            "DELETE FROM conversation_messages WHERE user_id = ? AND date(ts) = ?",
+            (user_id, today),
+        )
+        deleted = cur.rowcount or 0
+    conn.close()
+    return deleted

@@ -396,3 +396,87 @@ def migrate_sql_goal_if_needed(user_id: int, sql_kcal) -> bool:
     stamped = f"{_GOAL_MIGRATION_MARKER} on {date_str} -->\n{migrated}"
     goals_path.write_text(stamped, encoding="utf-8")
     return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test-cleanup: strip every line stamped with [today] from each wiki page.
+#
+# Used by /reset_today. The ingest pipeline stamps every new bullet/note with
+# a leading [YYYY-MM-DD] prefix (see wiki_instructions.md), so we can wipe a
+# day's worth of test-generated noise by deleting any line whose first non-
+# whitespace token after the bullet marker is [<today>]. A bullet may be
+#   - [2026-04-19] foo
+#   * [2026-04-19] bar
+#   [2026-04-19] baz   (rare — non-bulleted)
+# Multi-line bullets continue with leading whitespace; we drop those
+# continuation lines too, until we hit a non-indented line or the next bullet.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def strip_today_lines(user_id: int, today_str: str | None = None) -> dict[str, int]:
+    """Delete every today-stamped line from every wiki page for this user.
+    Caller is responsible for holding `get_lock(user_id)` — we read, mutate,
+    and write each page in turn.
+
+    Returns: {page_name: lines_removed} for pages where anything was stripped.
+    Pages with no today-stamped content are omitted.
+    """
+    from datetime import date as _date  # local import to avoid module-top noise
+
+    if today_str is None:
+        today_str = _date.today().isoformat()
+
+    # A line is "today-stamped" if it carries [<today>] as its first
+    # significant token (after an optional bullet marker `- `, `* `, or `+ `).
+    today_stamp = f"[{today_str}]"
+
+    def is_today_line(line: str) -> bool:
+        s = line.lstrip()
+        # Strip leading bullet marker if present
+        for marker in ("- ", "* ", "+ "):
+            if s.startswith(marker):
+                s = s[len(marker):]
+                break
+        return s.startswith(today_stamp)
+
+    def is_continuation(line: str) -> bool:
+        # A continuation of a previous bullet: starts with whitespace and
+        # is not itself a bullet. Used to drop wrapped lines belonging to
+        # a today-stamped bullet we're removing.
+        if not line:
+            return False
+        if not (line.startswith(" ") or line.startswith("\t")):
+            return False
+        s = line.lstrip()
+        return not s.startswith(("- ", "* ", "+ ", "#"))
+
+    result: dict[str, int] = {}
+    for page in PAGES:
+        content = read_page(user_id, page)
+        if not content or today_stamp not in content:
+            continue
+
+        out_lines: list[str] = []
+        removed = 0
+        dropping = False  # True while we're skipping a today-stamped bullet's continuations
+        for line in content.splitlines():
+            if is_today_line(line):
+                removed += 1
+                dropping = True
+                continue
+            if dropping and is_continuation(line):
+                removed += 1
+                continue
+            dropping = False
+            out_lines.append(line)
+
+        if removed == 0:
+            continue
+
+        # Collapse runs of 3+ blank lines down to a single blank, leave a
+        # trailing newline. Keeps the page tidy after surgical removal.
+        new_content = "\n".join(out_lines)
+        new_content = re.sub(r"\n{3,}", "\n\n", new_content).rstrip() + "\n"
+        write_page(user_id, page, new_content)
+        result[page] = removed
+
+    return result
