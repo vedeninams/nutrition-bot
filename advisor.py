@@ -194,6 +194,7 @@ def _consolidate_items(items: list[dict]) -> list[dict]:
             merged[key] = {
                 "_stem": stem,
                 "_unit": unit,
+                "_count": 0,
                 "dish_name": it.get("dish_name"),
                 "grams": 0.0,
                 "kcal": 0.0,
@@ -203,6 +204,7 @@ def _consolidate_items(items: list[dict]) -> list[dict]:
                 "sugar_g": 0.0,
             }
         acc = merged[key]
+        acc["_count"]    += 1
         acc["grams"]     += _parse_grams(it.get("dish", "") or "")
         acc["kcal"]      += it.get("kcal", 0) or 0
         acc["protein_g"] += it.get("protein_g", 0) or 0
@@ -212,11 +214,14 @@ def _consolidate_items(items: list[dict]) -> list[dict]:
 
     out: list[dict] = []
     for acc in merged.values():
-        # Rebuild a dish string from stem + summed amount.
+        # Rebuild a dish string from stem + count + summed amount.
+        # The ×N marker only appears when we actually merged 2+ rows —
+        # single items stay clean (no noisy "×1").
+        count_str = f" ×{acc['_count']}" if acc["_count"] > 1 else ""
         if acc["_unit"] and acc["grams"] > 0:
-            dish = f"{acc['_stem']} {acc['grams']:.0f}{acc['_unit']}"
+            dish = f"{acc['_stem']}{count_str} {acc['grams']:.0f}{acc['_unit']}"
         else:
-            dish = acc["_stem"]
+            dish = f"{acc['_stem']}{count_str}"
         out.append({
             "dish": dish,
             "dish_name": acc["dish_name"],
