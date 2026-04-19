@@ -630,6 +630,19 @@ principle for any other follow-up you see):
 - Explicit recipe / cooking requests are always question, regardless of
   context ("give me a recipe for X", "how do I cook X?", "recipie for ...").
 
+- Bot just SHOWED the user their own wiki / profile / goals / patterns /
+  weekly review (i.e. the bot just dumped out what it knows about them) →
+  the user's request to change, remove, replace, drop, forget, or update
+  something from what was just shown is a remember (it's a wiki edit).
+  The "something" refers to the page that was just displayed. Do NOT treat
+  this as a correction — correction is only for just-logged MEALS.
+    bot showed /profile → "remove the vegetarian line"              → remember
+    bot showed /goals → "drop the healthy fats goal"                 → remember
+    bot showed /goals → "change target weight to 65"                 → remember
+    bot showed /profile → "I'm not lactose intolerant any more"      → remember
+    bot showed weekly review mentioning a pattern → "that's not true any more, drop it"
+                                                                     → remember
+
 - If the recent history is genuinely unrelated (or empty) and the user
   describes food as a fresh thought, it's log_text.
     (no recent log / unrelated) → "I had oatmeal with banana"  → log_text
@@ -645,10 +658,11 @@ Intents:
   cmd_week      — wants the FULL weekly review/summary covering everything (e.g. "weekly review", "how was my week overall", "give me my Sunday review", "show me this week"). NOT when the user asks about a specific nutrient, meal, or aspect — those are questions, even when they mention "this week".
   cmd_goal      — wants to CHANGE or SET their calorie goal to a specific number (e.g. "set my goal to 1800", "change my goal to 2200 calories") — NOT asking what it should be
   cmd_lint      — wants the bot to tidy up / clean up / dedupe / review its own notes or memory about the user (e.g. "lint", "tidy up", "tidy up your notes", "clean up your notes", "dedup my notes", "dedupe", "clean up my profile", "sort out your memory", "review your notes about me", "check your notes for contradictions"). This is about the bot's own housekeeping of what it remembers — NOT about the user's food log or daily summary.
-  remember      — sharing a personal fact, restriction, or INTENTION about themselves to be remembered. This covers both current-state facts AND forward-looking goals or intentions.
-                  Current-state examples: "I don't eat fish", "I'm vegetarian", "I'm allergic to nuts", "I weigh 67kg", "my height is 165cm", "I go to the gym 3x a week"
-                  Forward-looking examples: "I would like to eat more healthy fats", "I'm trying to cut sugar", "I want to eat less sweets", "my goal is to eat healthier", "I'd like to lose 5kg"
-                  If the message describes who the user IS or what they're trying to DO, it's a remember.
+  remember      — sharing a personal fact, restriction, or INTENTION about themselves to be remembered. This covers three sub-cases:
+                  (a) Adding a current-state fact: "I don't eat fish", "I'm vegetarian", "I'm allergic to nuts", "I weigh 67kg", "my height is 165cm", "I go to the gym 3x a week"
+                  (b) Adding a forward-looking goal/intention: "I would like to eat more healthy fats", "I'm trying to cut sugar", "I want to eat less sweets", "my goal is to eat healthier", "I'd like to lose 5kg"
+                  (c) RETRACTING or CHANGING something already remembered — when the bot just showed the user their profile/goals/patterns (or a weekly review that surfaces them), and the user asks to remove, drop, forget, cancel, or replace one of the lines shown. See the wiki-edit context pattern above. This is still a remember (the ingest pipeline handles the retraction), NOT a correction.
+                  If the message describes who the user IS, what they're trying to DO, or asks to edit those facts after the bot just displayed them, it's a remember.
 
 IMPORTANT:
 - "what should my goal be?" → question

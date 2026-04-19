@@ -874,6 +874,7 @@ Respond with ONLY a JSON object (no prose, no markdown code fences) in this exac
   "reasoning": "one sentence explaining your decision",
   "updates": [
     {{"page": "patterns|profile|goals|wins", "action": "append", "content": "- [{today}] bullet text"}},
+    {{"page": "patterns|profile|goals|wins", "action": "remove_line", "target": "distinctive substring from the existing bullet"}},
     {{"page": "log", "action": "log_entry", "summary": "brief summary", "details": "optional"}}
   ]
 }}
@@ -898,6 +899,37 @@ Decision rules:
   The `[{today}]` prefix is required; the `(observed Nx since …)` tail is optional.
 - Add a log_entry ONLY for genuinely notable events: a pattern observed for the first time, a contradiction flagged, a milestone hit.
 - Respect the ~30-bullet cap per page.  If a page is nearing the cap, prefer not appending unless clearly new.
+
+When to emit `remove_line` (retracting a fact/goal/pattern):
+- Use this action when the user asks to drop, remove, forget, cancel, or replace
+  something that is ALREADY in the wiki above.  The user has just said "remove
+  X", "I no longer want X", "forget about X", "change X to Y", etc., and a
+  matching bullet exists on the relevant page.
+- The "target" field is a SHORT, DISTINCTIVE substring copied from the existing
+  bullet — enough to uniquely identify it among other bullets on that page.
+  The match is case-insensitive substring against bullet lines only.  Do NOT
+  include the date prefix; pick a phrase from the meaningful part of the line.
+- Only bullets on patterns/profile/goals/wins are eligible.  Never emit
+  remove_line for "log".
+- If the user is REPLACING a fact (e.g. "change my goal from X to Y"), emit
+  BOTH a remove_line for the old bullet AND an append for the new one.
+- If no matching bullet exists, do NOT emit remove_line and do NOT append
+  anything about the retraction — just return an empty updates list and
+  explain in reasoning.
+- Worked examples (given that the wiki state above shows the bullets):
+
+  Goals page contains: `- [2026-04-01] Wants to eat more healthy fats`
+  User says: "remove from goals eating healthy fats"
+  → {{"page": "goals", "action": "remove_line", "target": "healthy fats"}}
+
+  Profile page contains: `- [2026-03-20] Target weight: 68kg`
+  User says: "change target weight to 65"
+  → two updates: remove_line target="Target weight: 68kg",
+    then append "- [{today}] Target weight: 65kg"
+
+  Patterns page contains: `- [2026-04-05] Skips breakfast on weekends`
+  User says: "I eat breakfast every day now, drop that weekend pattern"
+  → {{"page": "patterns", "action": "remove_line", "target": "Skips breakfast on weekends"}}
 """
 
 
@@ -976,9 +1008,15 @@ async def ingest_interaction(
 
 def _apply_wiki_update(user_id: int, upd: dict) -> None:
     """
-    Apply one structured update to the wiki.  Only additive ops are allowed:
-    append a bullet to one of the four editable pages, or add a dated log entry.
-    Weekly lint (Step 4) is the only pass allowed to rewrite existing content.
+    Apply one structured update to the wiki.  Supported actions:
+      - append      : add a new bullet to patterns/profile/goals/wins
+      - remove_line : remove an existing bullet from those same pages
+                      (used when the user retracts or changes a fact/goal)
+      - log_entry   : add a dated entry to log.md
+
+    Weekly lint (Step 4) is still the only pass that rewrites bulk content;
+    remove_line is a surgical single-bullet delete driven by the user's
+    own request (e.g. "remove the healthy-fats goal"), not a global pass.
     """
     page = upd.get("page", "")
     # Be defensive: Haiku sometimes emits "goals.md" instead of "goals"
@@ -1008,6 +1046,61 @@ def _apply_wiki_update(user_id: int, upd: dict) -> None:
         existing = wiki.strip_empty_placeholder(wiki.read_page(user_id, page)).rstrip()
         new_content = f"{existing}\n{content}\n"
         wiki.write_page(user_id, page, new_content)
+
+    elif action == "remove_line" and page in ("patterns", "profile", "goals", "wins"):
+        # Delete one (or more) existing bullets from a page based on a
+        # target substring Haiku picked.  Haiku sees the whole wiki in the
+        # ingest prompt, so it can emit a target that uniquely matches the
+        # line the user wants dropped — e.g. target="healthy fats" when
+        # the existing line is "- [2026-04-01] Wants to eat more healthy
+        # fats".  Case-insensitive substring match.  Only bullet lines
+        # ('-', '*', '•') are eligible — headers, comments, blank lines,
+        # and the HTML schema hints are always preserved.
+        target = (upd.get("target") or "").strip()
+        if not target:
+            return
+        existing = wiki.read_page(user_id, page)
+        if not existing:
+            _ingest_logger.warning(
+                f"user={user_id} remove_line page={page} NO_PAGE target={target!r}"
+            )
+            return
+
+        target_lower = target.lower()
+        out_lines = []
+        removed_lines: list[str] = []
+        for line in existing.split("\n"):
+            stripped = line.lstrip()
+            is_bullet = stripped.startswith(("- ", "* ", "• "))
+            if is_bullet and target_lower in line.lower():
+                removed_lines.append(line.strip())
+                continue
+            out_lines.append(line)
+
+        if not removed_lines:
+            _ingest_logger.warning(
+                f"user={user_id} remove_line page={page} NOT_FOUND target={target!r}"
+            )
+            return
+
+        if len(removed_lines) > 1:
+            _ingest_logger.info(
+                f"user={user_id} remove_line page={page} matched_multiple "
+                f"removed={len(removed_lines)} target={target!r}"
+            )
+
+        # Collapse blank-line runs the removal may have created (3+ newlines → 2)
+        new_content = _re.sub(r"\n{3,}", "\n\n", "\n".join(out_lines))
+        wiki.write_page(user_id, page, new_content)
+
+        # Audit trail: every user-driven wiki retraction leaves a breadcrumb
+        # in log.md, matching the convention used by the weekly lint and the
+        # contradiction-resolution pipeline. This way log.md is the single
+        # place to see every change ever made to the wiki, regardless of
+        # which pipeline made it.
+        summary = f"Removed {len(removed_lines)} line(s) from {page}.md (user request)"
+        details = "\n".join(removed_lines)
+        wiki.append_log(user_id, summary, details)
 
     elif action == "log_entry" and page == "log":
         summary = (upd.get("summary") or "").strip()
