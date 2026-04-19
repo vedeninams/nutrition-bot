@@ -705,9 +705,12 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ── Remember: personal fact or intention to store ────────────────────────
     if intent == "remember":
         # The wiki is now the single source of truth for long-term memory.
-        # Fire-and-forget ingest decides whether this is a durable identity
-        # fact (profile.md) or an active intention (goals.md) and writes there.
-        await _send(update, "✅ Got it, I'll remember that.")
+        # Fire-and-forget ingest decides whether this turn is an add, a
+        # removal, or a rewrite — we don't know which at reply time, so the
+        # confirmation needs to be NEUTRAL.  "I'll remember that" would be
+        # wrong (and a little contradictory) when the user has just asked to
+        # forget or retract something.
+        await _send(update, "✅ Got it — updating my notes.")
         advisor.schedule_ingest(user_id, "remember", text, "Saved.")
         return
 

@@ -874,7 +874,8 @@ Respond with ONLY a JSON object (no prose, no markdown code fences) in this exac
   "reasoning": "one sentence explaining your decision",
   "updates": [
     {{"page": "patterns|profile|goals|wins", "action": "append", "content": "- [{today}] bullet text"}},
-    {{"page": "patterns|profile|goals|wins", "action": "remove_line", "target": "distinctive substring from the existing bullet"}}
+    {{"page": "patterns|profile|goals|wins", "action": "remove_line", "target": "distinctive substring from the existing bullet"}},
+    {{"page": "patterns|profile|goals|wins", "action": "replace_line", "target": "distinctive substring from the existing bullet", "new_content": "- [{today}] rewritten bullet text"}}
   ]
 }}
 
@@ -900,36 +901,61 @@ Decision rules:
   The `[{today}]` prefix is required; the `(observed Nx since …)` tail is optional.
 - Respect the ~30-bullet cap per page.  If a page is nearing the cap, prefer not appending unless clearly new.
 
-When to emit `remove_line` (retracting a fact/goal/pattern):
-- Use this action when the user asks to drop, remove, forget, cancel, or replace
-  something that is ALREADY in the wiki above.  The user has just said "remove
-  X", "I no longer want X", "forget about X", "change X to Y", etc., and a
-  matching bullet exists on the relevant page.
-- The "target" field is a SHORT, DISTINCTIVE substring copied from the existing
-  bullet — enough to uniquely identify it among other bullets on that page.
-  The match is case-insensitive substring against bullet lines only.  Do NOT
-  include the date prefix; pick a phrase from the meaningful part of the line.
+When to emit `remove_line` vs `replace_line` (retracting a fact/goal/pattern):
+
+Use one of these actions when the user asks to drop, remove, forget, cancel,
+or replace something that is ALREADY in the wiki above.  The user has just
+said "remove X", "I no longer want X", "forget about X", "change X to Y",
+etc., and a matching bullet exists on the relevant page.
+
+Pick the RIGHT action by looking at the existing bullet:
+
+- `remove_line` — when the existing bullet contains ONLY the fact being
+  retracted.  Deletes the whole bullet.
+- `replace_line` — when the existing bullet contains MULTIPLE facts jammed
+  together (often via ";" or ","), and the user is retracting ONLY ONE of
+  them.  Rewrites the bullet in place with the remaining fact(s).
+- Two updates (remove_line + append) — when the user is REPLACING a bullet
+  with a semantically different one (e.g. "change my goal from X to Y").
+
+Common rules for both:
+- The "target" field is a SHORT, DISTINCTIVE substring copied from the
+  existing bullet — enough to uniquely identify it.  Case-insensitive
+  substring match against bullet lines.  Do NOT include the date prefix.
 - Only bullets on patterns/profile/goals/wins are eligible.  Never emit
-  remove_line for "log".
-- If the user is REPLACING a fact (e.g. "change my goal from X to Y"), emit
-  BOTH a remove_line for the old bullet AND an append for the new one.
-- If no matching bullet exists, do NOT emit remove_line and do NOT append
-  anything about the retraction — just return an empty updates list and
-  explain in reasoning.
-- Worked examples (given that the wiki state above shows the bullets):
+  remove_line/replace_line for "log".
+- If no matching bullet exists, do NOT emit either action and do NOT append
+  anything about the retraction — return an empty updates list and explain
+  in reasoning.
+- For `replace_line`, `new_content` MUST include the `- [{today}]` prefix
+  just like an append (we're writing a whole new line; lint relies on the
+  date prefix).
+
+Worked examples (given the wiki state above shows the bullet):
 
   Goals page contains: `- [2026-04-01] Wants to eat more healthy fats`
   User says: "remove from goals eating healthy fats"
   → {{"page": "goals", "action": "remove_line", "target": "healthy fats"}}
+  (The bullet is only about healthy fats — safe to delete whole.)
+
+  Profile page contains: `- [2026-03-15] Does not eat olive oil; prefers healthy fats`
+  User says: "remove about not eating olive oil"
+  → {{"page": "profile", "action": "replace_line",
+       "target": "olive oil",
+       "new_content": "- [{today}] Prefers healthy fats"}}
+  (The bullet has TWO facts — use replace_line to keep the other one.)
 
   Profile page contains: `- [2026-03-20] Target weight: 68kg`
   User says: "change target weight to 65"
-  → two updates: remove_line target="Target weight: 68kg",
-    then append "- [{today}] Target weight: 65kg"
+  → two updates:
+     remove_line target="Target weight: 68kg",
+     append "- [{today}] Target weight: 65kg"
+  (Bullet is one fact being replaced by a semantically different one.)
 
   Patterns page contains: `- [2026-04-05] Skips breakfast on weekends`
   User says: "I eat breakfast every day now, drop that weekend pattern"
-  → {{"page": "patterns", "action": "remove_line", "target": "Skips breakfast on weekends"}}
+  → {{"page": "patterns", "action": "remove_line",
+       "target": "Skips breakfast on weekends"}}
 """
 
 
@@ -1006,17 +1032,53 @@ async def ingest_interaction(
         _ingest_logger.error(f"user={user_id} INGEST_FAIL err={e!r}")
 
 
+def _consolidate_goal_line_if_changed(user_id: int) -> None:
+    """
+    After any write to goals.md, collapse duplicate calorie-goal bullets to
+    one canonical line (later value wins).  Same logic /lint runs weekly,
+    just triggered on every ingest write so the duplication can't surface
+    in /profile.  Idempotent: does nothing when the page already has 0 or 1
+    calorie-goal lines.  Logs when it actually rewrote anything so the
+    collapse is visible in ingest.log.
+    """
+    try:
+        result = wiki.consolidate_goal_line(user_id)
+    except Exception as e:
+        _ingest_logger.error(f"user={user_id} consolidate_goal_line FAIL err={e!r}")
+        return
+    if result.get("rewrote"):
+        _ingest_logger.info(
+            f"user={user_id} consolidated goals.md calorie line: "
+            f"found={result.get('found')} kept={result.get('kept')}"
+        )
+        wiki.append_log(
+            user_id,
+            "Consolidated duplicate calorie-goal lines in goals.md",
+            f"kept: {result.get('kept')} kcal (found {result.get('found')} lines)",
+        )
+
+
 def _apply_wiki_update(user_id: int, upd: dict) -> None:
     """
     Apply one structured update to the wiki.  Supported actions:
-      - append      : add a new bullet to patterns/profile/goals/wins
-      - remove_line : remove an existing bullet from those same pages
-                      (used when the user retracts or changes a fact/goal)
-      - log_entry   : add a dated entry to log.md
+      - append       : add a new bullet to patterns/profile/goals/wins
+      - remove_line  : remove an existing bullet whole (case-insensitive
+                       substring match against bullet lines)
+      - replace_line : find an existing bullet and rewrite it in place.
+                       Use this when the user retracts ONE fact from a
+                       bullet that currently contains MULTIPLE facts —
+                       e.g. "- Does not eat olive oil; prefers healthy
+                       fats" and the user only wants the olive-oil part
+                       gone. remove_line would lose both facts.
+      - log_entry    : add a dated entry to log.md
 
-    Weekly lint (Step 4) is still the only pass that rewrites bulk content;
-    remove_line is a surgical single-bullet delete driven by the user's
-    own request (e.g. "remove the healthy-fats goal"), not a global pass.
+    Weekly lint is still the only pass that rewrites bulk content;
+    remove_line / replace_line are surgical single-bullet operations
+    driven by the user's own request, not global passes.
+
+    After any change to goals.md we auto-consolidate the calorie-goal
+    line so duplicate "Daily calorie goal: N kcal" bullets can't
+    accumulate — one canonical bullet always wins, later value kept.
     """
     page = upd.get("page", "")
     # Be defensive: Haiku sometimes emits "goals.md" instead of "goals"
@@ -1055,6 +1117,14 @@ def _apply_wiki_update(user_id: int, upd: dict) -> None:
         # NEVER rewrite past entries, they only add new ones.
         wiki.append_log(user_id, f"Added to {page}.md", content)
 
+        # Goals.md specifically can accumulate duplicate calorie-goal lines
+        # when Haiku appends one from natural conversation ("I want 2000
+        # kcal/day") while a canonical bullet is already there from /goal.
+        # The /lint pass already collapses them; do it on every write too
+        # so the duplication never surfaces in /profile.  Idempotent.
+        if page == "goals":
+            _consolidate_goal_line_if_changed(user_id)
+
     elif action == "remove_line" and page in ("patterns", "profile", "goals", "wins"):
         # Delete one (or more) existing bullets from a page based on a
         # target substring Haiku picked.  Haiku sees the whole wiki in the
@@ -1064,6 +1134,11 @@ def _apply_wiki_update(user_id: int, upd: dict) -> None:
         # fats".  Case-insensitive substring match.  Only bullet lines
         # ('-', '*', '•') are eligible — headers, comments, blank lines,
         # and the HTML schema hints are always preserved.
+        #
+        # IMPORTANT: this deletes the WHOLE bullet.  If the bullet contains
+        # multiple facts (e.g. "Does not eat olive oil; prefers healthy
+        # fats") and the user wants only ONE of them gone, Haiku should
+        # emit `replace_line` instead.
         target = (upd.get("target") or "").strip()
         if not target:
             return
@@ -1112,6 +1187,72 @@ def _apply_wiki_update(user_id: int, upd: dict) -> None:
             else f"Removed {len(removed_lines)} lines from {page}.md"
         )
         wiki.append_log(user_id, summary, "\n".join(removed_lines))
+
+        if page == "goals":
+            _consolidate_goal_line_if_changed(user_id)
+
+    elif action == "replace_line" and page in ("patterns", "profile", "goals", "wins"):
+        # Surgical in-place rewrite of a single bullet.  Finds a bullet by
+        # case-insensitive substring on `target`, then swaps its content
+        # to `new_content`.  Used when the user retracts ONE fact from a
+        # bullet that contains multiple facts — we keep the remaining
+        # fact instead of dropping the whole line.
+        #
+        # Contract: the new_content replaces the ENTIRE bullet (Haiku
+        # supplies the `- [date] …` shape).  If multiple bullets match
+        # `target`, we only rewrite the first to stay conservative; if
+        # that's wrong we'd rather under-edit than over-edit.
+        target = (upd.get("target") or "").strip()
+        new_content_raw = (upd.get("new_content") or "").strip()
+        if not target or not new_content_raw:
+            return
+        existing = wiki.read_page(user_id, page)
+        if not existing:
+            _ingest_logger.warning(
+                f"user={user_id} replace_line page={page} NO_PAGE target={target!r}"
+            )
+            return
+
+        # Normalize new_content the same way append does so we get one clean
+        # "- " bullet regardless of what Haiku emitted.
+        normalized = _re.sub(r"^[\s\-\*•·‣⁃]+", "", new_content_raw).strip()
+        if not normalized:
+            return
+        normalized = f"- {normalized}"
+
+        target_lower = target.lower()
+        out_lines: list[str] = []
+        replaced = False
+        old_line = ""
+        for line in existing.split("\n"):
+            stripped = line.lstrip()
+            is_bullet = stripped.startswith(("- ", "* ", "• "))
+            if not replaced and is_bullet and target_lower in line.lower():
+                # Preserve leading whitespace from the original line so the
+                # rewritten bullet sits at the same indent level.
+                indent = line[: len(line) - len(stripped)]
+                old_line = line.strip()
+                out_lines.append(f"{indent}{normalized}")
+                replaced = True
+                continue
+            out_lines.append(line)
+
+        if not replaced:
+            _ingest_logger.warning(
+                f"user={user_id} replace_line page={page} NOT_FOUND target={target!r}"
+            )
+            return
+
+        new_page = _re.sub(r"\n{3,}", "\n\n", "\n".join(out_lines))
+        wiki.write_page(user_id, page, new_page)
+        wiki.append_log(
+            user_id,
+            f"Rewrote a line in {page}.md",
+            f"from: {old_line}\nto:   {normalized}",
+        )
+
+        if page == "goals":
+            _consolidate_goal_line_if_changed(user_id)
 
     elif action == "log_entry" and page == "log":
         summary = (upd.get("summary") or "").strip()
