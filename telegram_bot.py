@@ -762,9 +762,24 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # ── Correction ──────────────────────────────────────────────────────────
     if intent == "correction":
-        recent = db.get_recent_meals(user_id, limit=10)
+        # Use today's FULL log as the candidate pool, not just the last 10
+        # rows. Rationale: on a busy day (e.g. breakfast + lunch + dinner +
+        # multiple snacks, 15-20 rows) a "last 10 meals" cap pushes the
+        # morning meals out of the resolver's view. When the user then
+        # corrects the morning cottage cheese, Haiku can't see it in history
+        # and hallucinates a meal_id that *is* in the window — which
+        # silently rewrites the wrong row (see 2026-04-20 incident where
+        # "Cottage cheese for breakfast was 100g" overwrote the Borscht
+        # lunch row because id 757 wasn't actually in the candidate set but
+        # Haiku returned it anyway).
+        #
+        # Fall back to recent-10 only if today has no meals at all (rare
+        # edge case: user corrects yesterday's log at 00:01 Berlin).
+        recent = db.get_today_meals(user_id)
         if not recent:
-            await _send(update, 
+            recent = db.get_recent_meals(user_id, limit=10)
+        if not recent:
+            await _send(update,
                 "I don't have any recent meals to correct. Log something first!"
             )
             return
@@ -785,6 +800,20 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"recent_count={len(recent)} last_batch_count={len(last_batch) if last_batch else 0} "
             f"results={results}"
         )
+
+        # Integrity guard — build the set of meal_ids that were actually
+        # visible to Haiku. Any `update`/`delete`/`update_many`/`delete_many`
+        # pointing at an id outside this set is a hallucination and must
+        # be rejected BEFORE touching the DB. (batch items are always a
+        # subset of today's log, so `recent` alone is the right anchor.)
+        candidate_ids: set[int] = {m["id"] for m in recent}
+
+        def _id_is_valid(mid) -> bool:
+            """Accept only int-coercible ids that match a row we passed to Haiku."""
+            try:
+                return int(mid) in candidate_ids
+            except (TypeError, ValueError):
+                return False
 
         # Filter out "none" actions before processing
         valid_results = [r for r in results if r.get("action", "none") != "none"]
@@ -834,8 +863,20 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             elif action == "update_many":
                 meal_ids = result.get("meal_ids", [])
                 updates = result.get("updates", {})
-                if meal_ids and updates:
-                    updated = sum(1 for mid in meal_ids if db.update_meal(mid, updates, reason=result.get("reason", "")))
+                # Drop any hallucinated ids before writing — see integrity-guard
+                # note above.  If ALL ids are bad we refuse the whole action.
+                safe_ids = [mid for mid in meal_ids if _id_is_valid(mid)]
+                if meal_ids and not safe_ids:
+                    log.warning(
+                        f"update_many rejected: all meal_ids {meal_ids} outside candidate set "
+                        f"{sorted(candidate_ids)} — likely Haiku hallucination"
+                    )
+                    reply_lines.append(
+                        "⚠️ I couldn't confidently identify which entries you meant. "
+                        "Try naming the dish more specifically."
+                    )
+                elif safe_ids and updates:
+                    updated = sum(1 for mid in safe_ids if db.update_meal(mid, updates, reason=result.get("reason", "")))
                     meal_type = updates.get("meal_type", "")
                     meal_emoji = {"breakfast": "🌅", "lunch": "☀️", "dinner": "🌙", "snack": "🍎"}.get(meal_type, "🍽")
                     reply_lines.append(f"✅ Updated {updated} items → {meal_emoji} *{meal_type}*")
@@ -876,32 +917,73 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             elif action == "delete_many":
                 meal_ids = result.get("meal_ids", [])
                 dish_name = result.get("dish_name")
+                # Trust dish_name delete only if it returns something, because
+                # delete_by_dish_name is scoped to the user's own rows so it
+                # cannot accidentally hit another meal via a hallucinated id.
+                # For the fallback-by-id path we DO filter to the candidate
+                # set first.
+                safe_ids = [mid for mid in meal_ids if _id_is_valid(mid)]
                 if dish_name:
                     deleted = db.delete_by_dish_name(user_id, dish_name)
-                    if deleted == 0 and meal_ids:
+                    if deleted == 0 and safe_ids:
                         # dish_name didn't match (wording/casing difference) —
                         # fall back to the explicit IDs Claude already resolved
-                        deleted = sum(1 for mid in meal_ids if db.delete_meal(mid))
+                        deleted = sum(1 for mid in safe_ids if db.delete_meal(mid))
                     reply_lines.append(f"🗑 Removed *{dish_name}* ({deleted} items)")
-                elif meal_ids:
-                    deleted = sum(1 for mid in meal_ids if db.delete_meal(mid))
+                elif safe_ids:
+                    deleted = sum(1 for mid in safe_ids if db.delete_meal(mid))
                     reply_lines.append(f"🗑 Removed {deleted} items")
+                elif meal_ids:
+                    # All ids were outside the candidate set — refuse silently
+                    # rather than delete something unrelated.
+                    log.warning(
+                        f"delete_many rejected: ids {meal_ids} outside candidate set "
+                        f"{sorted(candidate_ids)}"
+                    )
+                    reply_lines.append(
+                        "⚠️ I couldn't confidently identify which entries to remove. "
+                        "Try naming the dish."
+                    )
 
             # ── Delete single item ────────────────────────────────────────────
             elif action == "delete":
                 meal_id = result.get("meal_id")
-                meal = db.get_meal_by_id(meal_id) if meal_id else None
-                if db.delete_meal(meal_id):
-                    name = meal.get("dish", "item") if meal else "item"
-                    reply_lines.append(f"🗑 Removed *{name}*")
+                if not _id_is_valid(meal_id):
+                    log.warning(
+                        f"delete rejected: meal_id={meal_id!r} outside candidate set "
+                        f"{sorted(candidate_ids)}"
+                    )
+                    reply_lines.append(
+                        "⚠️ I couldn't confidently find that entry. Try being more specific."
+                    )
                 else:
-                    reply_lines.append("⚠️ Couldn't find that entry to remove")
+                    meal = db.get_meal_by_id(meal_id)
+                    if db.delete_meal(meal_id):
+                        name = meal.get("dish", "item") if meal else "item"
+                        reply_lines.append(f"🗑 Removed *{name}*")
+                    else:
+                        reply_lines.append("⚠️ Couldn't find that entry to remove")
 
             # ── Update single item ────────────────────────────────────────────
             elif action == "update":
                 meal_id = result.get("meal_id")
                 updates = result.get("updates", {})
-                if db.update_meal(meal_id, updates, reason=result.get("reason", "")):
+                # CRITICAL guard — Haiku has been observed to return a
+                # meal_id that wasn't in the context we gave it, causing
+                # an unrelated row (e.g. lunch Borscht) to be silently
+                # overwritten with update values meant for a different
+                # meal (e.g. breakfast cottage cheese). Reject those before
+                # they reach the DB.
+                if not _id_is_valid(meal_id):
+                    log.warning(
+                        f"update rejected: meal_id={meal_id!r} outside candidate set "
+                        f"{sorted(candidate_ids)}; updates={updates!r} reason={result.get('reason')!r}"
+                    )
+                    reply_lines.append(
+                        "⚠️ I couldn't confidently match that to one of your logged meals. "
+                        "Please re-state which dish, e.g. \"cottage cheese 100g\"."
+                    )
+                elif db.update_meal(meal_id, updates, reason=result.get("reason", "")):
                     meal = db.get_meal_by_id(meal_id)
                     name = meal.get("dish", "item") if meal else "item"
                     new_kcal = meal.get("kcal", "?") if meal else "?"
