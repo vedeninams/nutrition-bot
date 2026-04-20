@@ -269,13 +269,16 @@ def classify_meal_type(now: datetime, last_meal: Optional[dict] = None) -> str:
 
     Rules (no kcal/size involvement):
 
-      1. Inheritance (90-min rule):
-         If there is a prior meal logged earlier today AND the gap to it is
-         ≤ 90 minutes, the new item inherits that meal's meal_type.
-         (Rationale: a banana eaten 30 min after breakfast is still part of
-         breakfast, not a snack.)
+      If there IS a prior meal logged earlier today, the 90-min rule decides:
+        - gap ≤ 90 minutes → inherit the prior meal's meal_type
+                             (a banana 30 min after breakfast is still
+                             breakfast)
+        - gap >  90 minutes → snack
+                             (a banana 2 hours after breakfast is a snack,
+                             even if the clock still says "breakfast time")
 
-      2. Otherwise classify by time-of-day window (Berlin wall-clock):
+      If there is NO prior meal today (first log of the day), classify by
+      Berlin wall-clock time-of-day window:
            04:00 → 11:29  → breakfast
            11:30 → 15:59  → lunch
            16:00 → 22:59  → dinner
@@ -292,19 +295,25 @@ def classify_meal_type(now: datetime, last_meal: Optional[dict] = None) -> str:
 
     Returns one of: "breakfast", "lunch", "dinner", "snack".
     """
-    # Tier 2a — inherit prior meal if within 90 min
+    # If there's a prior meal today, the 90-min rule decides — ignore the
+    # time-of-day window entirely.
     if last_meal is not None:
         raw = last_meal.get("logged_at")
         try:
             prior = raw if isinstance(raw, datetime) else datetime.fromisoformat(raw)
         except (TypeError, ValueError):
             prior = None
-        if prior is not None and (now - prior) <= timedelta(minutes=90):
-            inherited = last_meal.get("meal_type")
-            if inherited in ("breakfast", "lunch", "dinner", "snack"):
-                return inherited
+        if prior is not None:
+            if (now - prior) <= timedelta(minutes=90):
+                inherited = last_meal.get("meal_type")
+                if inherited in ("breakfast", "lunch", "dinner", "snack"):
+                    return inherited
+                # Unknown prior meal_type → fall through to time-of-day
+            else:
+                return "snack"
+        # Malformed logged_at → fall through to time-of-day as a safe default
 
-    # Tier 2b — time-of-day window
+    # First meal of the day (or malformed prior) — classify by time window.
     minutes = now.hour * 60 + now.minute
     if 4 * 60 <= minutes < 11 * 60 + 30:      # 04:00 → 11:29
         return "breakfast"
