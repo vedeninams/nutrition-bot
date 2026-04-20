@@ -11,6 +11,20 @@ A personal Telegram nutritionist. Send photos of food or nutrition labels and it
 - 📊 **Daily and weekly summaries** pushed automatically
 - ⚡ **Limit alerts** when you hit 80% of your daily goal
 
+## When the bot will ping you
+
+The bot runs on Berlin time, so all the times below are Berlin wall-clock — no timezone math needed.
+
+You don't have to do anything to get these; they just show up:
+
+- **Every evening at 21:00** — a daily wrap-up of what you ate, your totals for the day, and a short note on how it went versus your goal.
+- **Every Sunday at 09:00** — a weekly review: trends, patterns the bot noticed, and what to try next week.
+- **Occasionally on Saturday mornings (around 10:05)** — if the bot spots something in its notes about you that contradicts itself (for example, two different stated goals), it will send a short message asking you to clarify. If everything looks consistent, you won't hear from it.
+
+On top of that, if you cross 80% of your daily calorie goal during the day, the bot will send a quick heads-up so you can plan the rest of the day.
+
+Everything else is on-demand — you send a photo or a message, the bot replies. No silent tracking, no surprise pings outside the times above.
+
 ## Project structure
 
 ```
