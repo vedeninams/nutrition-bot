@@ -109,17 +109,29 @@ systemctl status nutrition-bot
 
 ### Cron jobs for proactive push
 
+The server's OS timezone should be set to `Europe/Berlin` so all times
+below are literal Berlin wall-clock times (no `CRON_TZ` needed — Ubuntu
+cron ignores that directive):
+
 ```bash
+timedatectl set-timezone Europe/Berlin
+systemctl restart cron
+systemctl restart nutrition-bot
 crontab -e
 ```
 
 Add:
 ```
-# Daily morning summary at 08:00
-0 8 * * * /root/nutrition-bot/venv/bin/python /root/nutrition-bot/telegram_bot.py --daily-summary >> /var/log/nutrition-daily.log 2>&1
+# Evening summary — every day at 21:00 Berlin
+0 21 * * * cd /opt/nutrition-bot && /opt/nutrition-bot/venv/bin/python telegram_bot.py --evening-summary >> /var/log/nutrition-bot-cron.log 2>&1
 
-# Weekly review every Sunday at 08:30
-30 8 * * 0 /root/nutrition-bot/venv/bin/python /root/nutrition-bot/telegram_bot.py --weekly-review >> /var/log/nutrition-weekly.log 2>&1
+# Weekly review — every Sunday at 09:00 Berlin
+0 9 * * 0 cd /opt/nutrition-bot && /opt/nutrition-bot/venv/bin/python telegram_bot.py --weekly-review >> /var/log/nutrition-bot-cron.log 2>&1
+
+# Weekly memory tidy + contradiction check — every Saturday at 10:05 Berlin
+# (One day before the weekly review so the wiki is clean and any flagged
+# conflicts are surfaced to the user before Sunday's recap lands.)
+5 10 * * 6 /opt/nutrition-bot/venv/bin/python /opt/nutrition-bot/telegram_bot.py --lint-cron >> /opt/nutrition-bot/cron.log 2>&1
 ```
 
 ## Commands

@@ -1002,13 +1002,13 @@ async def run_weekly_review():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Saturday 10:05 Europe/Berlin — weekly tidy + contradiction check
+# Saturday 10:05 Berlin — weekly tidy + contradiction check
 #
 # Runs one day before the weekly review so the user's memory is clean and any
 # flagged conflicts are surfaced before the review lands.
 #
-# Install on the server (crontab -e) with:
-#     CRON_TZ=Europe/Berlin
+# Assumes the server's OS timezone is Europe/Berlin (Ubuntu's cron daemon
+# ignores CRON_TZ directives — set the OS timezone instead). Install with:
 #     5 10 * * 6 /opt/nutrition-bot/venv/bin/python /opt/nutrition-bot/telegram_bot.py --lint-cron
 # ─────────────────────────────────────────────────────────────────────────────
 
