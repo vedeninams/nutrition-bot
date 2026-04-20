@@ -237,39 +237,82 @@ def set_language(user_id: int, lang: str):
 # Meal classification
 # ─────────────────────────────────────────────────────────────────────────────
 
-def classify_meal_type(hour: int, kcal: float, total_dish_kcal: float = None) -> str:
+def get_last_meal_today(user_id: int) -> Optional[dict]:
     """
-    Fallback meal classification by time of day and dish size.
-    Only used when the user's caption does NOT mention a meal type.
-    Caption always takes priority — this is the last resort.
+    Return the most recent non-deleted meal logged by this user TODAY
+    (calendar day, server local time), or None if there is none.
 
-    Rules:
-      05:00–10:59  → breakfast
-      11:00–14:59  → lunch
-      15:00–16:59  → snack  (afternoon)
-      17:00–22:59  → dinner
-      23:00–04:59  → snack  (late night)
-      Any time, total dish < 150 kcal → snack
-
-    total_dish_kcal: use the full plate total so a 30-kcal broccoli
-    in a 600-kcal dinner plate isn't labelled a snack.
+    Used by the Tier-2 classifier to decide whether a new item inherits the
+    prior meal's meal_type (≤ 90 min gap) or gets classified independently
+    by time-of-day.
     """
-    ref_kcal = total_dish_kcal if total_dish_kcal is not None else kcal
-    if ref_kcal < 150:
-        return "snack"
-    if 5 <= hour < 11:
+    today = date.today().isoformat()
+    conn = get_conn()
+    row = conn.execute(
+        """SELECT id, logged_at, meal_type, dish_name
+             FROM meals
+            WHERE user_id = ?
+              AND date(logged_at) = ?
+              AND confidence != 'deleted'
+            ORDER BY logged_at DESC
+            LIMIT 1""",
+        (user_id, today),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def classify_meal_type(now: datetime, last_meal: Optional[dict] = None) -> str:
+    """
+    Fallback meal classification — used only when the user's caption does NOT
+    mention a meal type. Caption always wins; this is Tier 2.
+
+    Rules (no kcal/size involvement):
+
+      1. Inheritance (90-min rule):
+         If there is a prior meal logged earlier today AND the gap to it is
+         ≤ 90 minutes, the new item inherits that meal's meal_type.
+         (Rationale: a banana eaten 30 min after breakfast is still part of
+         breakfast, not a snack.)
+
+      2. Otherwise classify by time-of-day window (Berlin wall-clock):
+           04:00 → 11:29  → breakfast
+           11:30 → 15:59  → lunch
+           16:00 → 22:59  → dinner
+           23:00 → 03:59  → snack    (night snack, stored as "snack")
+
+    The 04:00 boundary belongs to breakfast (breakfast wins over the night
+    snack window from 04:00 onwards).
+
+    Args:
+      now:       the current timestamp (used for time-of-day lookup).
+      last_meal: the most recent meal logged earlier TODAY, or None.
+                 Must provide keys "logged_at" (ISO string or datetime) and
+                 "meal_type".
+
+    Returns one of: "breakfast", "lunch", "dinner", "snack".
+    """
+    # Tier 2a — inherit prior meal if within 90 min
+    if last_meal is not None:
+        raw = last_meal.get("logged_at")
+        try:
+            prior = raw if isinstance(raw, datetime) else datetime.fromisoformat(raw)
+        except (TypeError, ValueError):
+            prior = None
+        if prior is not None and (now - prior) <= timedelta(minutes=90):
+            inherited = last_meal.get("meal_type")
+            if inherited in ("breakfast", "lunch", "dinner", "snack"):
+                return inherited
+
+    # Tier 2b — time-of-day window
+    minutes = now.hour * 60 + now.minute
+    if 4 * 60 <= minutes < 11 * 60 + 30:      # 04:00 → 11:29
         return "breakfast"
-    if 11 <= hour < 15:
+    if 11 * 60 + 30 <= minutes < 16 * 60:     # 11:30 → 15:59
         return "lunch"
-    if 15 <= hour < 17:
-        return "snack"
-    if 17 <= hour < 21 and ref_kcal >= 300:
-        return "dinner"           # substantial meal in the evening
-    if 17 <= hour < 21 and ref_kcal < 300:
-        return "snack"            # light bite in the evening
-    if hour >= 21:
-        return "snack"            # anything after 21:00 → snack
-    return "snack"
+    if 16 * 60 <= minutes < 23 * 60:          # 16:00 → 22:59
+        return "dinner"
+    return "snack"                            # 23:00 → 03:59
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -288,20 +331,20 @@ def log_meal(
     source: str = "photo",
     meal_type: Optional[str] = None,
     dish_name: Optional[str] = None,
-    total_dish_kcal: Optional[float] = None,
     notes: Optional[str] = None,
 ) -> int:
     """
     Insert one meal row and return its id.
     dish_name = parent dish/plate (e.g. "Udon Noodle Bowl"); defaults to dish.
-    total_dish_kcal = sum of all ingredients in the dish (used for meal classification
-                      so a 30-kcal broccoli in a 600-kcal dinner isn't called a snack).
-    meal_type is auto-classified if not provided.
+    meal_type is auto-classified if not provided (Tier 2: 90-min-inherit
+    or time-of-day window). Batched inserts via log_meal_items should pass
+    meal_type explicitly so every item in a plate shares the same label.
     """
     ensure_user(user_id)
     now = datetime.now()
     if meal_type is None:
-        meal_type = classify_meal_type(now.hour, kcal, total_dish_kcal)
+        last_meal = get_last_meal_today(user_id)
+        meal_type = classify_meal_type(now, last_meal)
     if dish_name is None:
         dish_name = dish   # standalone item — dish_name = the item itself
 
@@ -330,18 +373,35 @@ def log_meal_items(user_id: int, items: list[dict], source: str = "photo") -> li
     Each item is a dict with keys: dish_name, dish, kcal, protein_g, fat_g,
     carbs_g, sugar_g, confidence, meal_type, notes.
 
-    meal_type classification uses the TOTAL dish kcal so that individual
-    low-kcal ingredients (e.g. broccoli 30 kcal) are not wrongly labelled
-    as "snack" when they belong to a 600 kcal dinner plate.
+    All items inserted in one call share the same meal_type: either the
+    caption-detected value (Tier 1) or a single Tier-2 auto-classification
+    computed ONCE against the user's state BEFORE any row from this batch
+    is inserted — so an 8-item plate won't flip types mid-insert, and the
+    first row of the batch doesn't become the "prior meal" for its own
+    sibling rows.
     """
-    # Total kcal across all items in this batch — used for meal classification
-    total_dish_kcal = sum(item.get("kcal", 0) for item in items)
+    # Tier 1 — caption-detected meal_type from the analyzer. First non-null
+    # wins; in practice the analyzer stamps every item in a dish with the
+    # same value.
+    caption_meal_type: Optional[str] = None
+    for item in items:
+        mt = item.get("meal_type")
+        if mt in ("breakfast", "lunch", "dinner", "snack"):
+            caption_meal_type = mt
+            break
+
+    # Tier 2 — classify once for the whole batch against the last meal
+    # logged BEFORE this batch (don't let earlier items in this batch
+    # influence the classification of later items in the same batch).
+    if caption_meal_type is not None:
+        batch_meal_type = caption_meal_type
+    else:
+        batch_meal_type = classify_meal_type(
+            datetime.now(), get_last_meal_today(user_id)
+        )
 
     ids = []
     for item in items:
-        # If Claude already detected a meal_type from caption, use it.
-        # Otherwise classify using the full dish total, not just this ingredient.
-        meal_type = item.get("meal_type") or None  # None → auto-classify in log_meal
         meal_id = log_meal(
             user_id=user_id,
             dish_name=item.get("dish_name"),
@@ -353,30 +413,25 @@ def log_meal_items(user_id: int, items: list[dict], source: str = "photo") -> li
             sugar_g=item.get("sugar_g", 0),
             confidence=item.get("confidence", "medium"),
             source=source,
-            meal_type=meal_type,
-            total_dish_kcal=total_dish_kcal,
+            meal_type=batch_meal_type,
             notes=item.get("notes"),
         )
         ids.append(meal_id)
 
-    # If Claude used "Plate" as placeholder (no caption meal_type) and the item
-    # was classified as breakfast, replace "Plate" with "Breakfast".
-    # Only applies to breakfast — lunch/dinner/snack use descriptive names already.
-    if ids:
+    # If Claude used "Plate" as placeholder (no caption meal_type) and the
+    # batch was classified as breakfast, replace "Plate" with "Breakfast".
+    # Only applies to breakfast — lunch/dinner/snack use descriptive names.
+    if ids and batch_meal_type == "breakfast":
         conn = get_conn()
-        first_row = conn.execute(
-            "SELECT meal_type FROM meals WHERE id = ?", (ids[0],)
-        ).fetchone()
-        if first_row and first_row["meal_type"] == "breakfast":
-            with conn:
-                conn.execute(
-                    """UPDATE meals SET dish_name = REPLACE(dish_name, 'Plate', 'Breakfast')
-                       WHERE id IN ({})
-                         AND dish_name LIKE '%Plate%'""".format(
-                        ",".join("?" * len(ids))
-                    ),
-                    (*ids,)
-                )
+        with conn:
+            conn.execute(
+                """UPDATE meals SET dish_name = REPLACE(dish_name, 'Plate', 'Breakfast')
+                   WHERE id IN ({})
+                     AND dish_name LIKE '%Plate%'""".format(
+                    ",".join("?" * len(ids))
+                ),
+                (*ids,)
+            )
         conn.close()
 
     return ids
