@@ -37,18 +37,39 @@ IMPORTANT: You must reply with ONLY a JSON array. No prose, no explanation.
 Each element must have exactly these keys:
   dish_name   — string, the NAME OF THE WHOLE DISH OR PLATE. ALL components of the
                 same plate share the EXACT SAME dish_name.
-                Rules by meal type:
-                - BREAKFAST: name by ingredient count:
+
+                NAMING PRIORITY — check rules in this order and STOP at the
+                first one that applies. Do NOT fall through to later rules.
+
+                RULE 1 (HIGHEST PRIORITY) — SINGLE STANDALONE ITEM:
+                  If the plate shows exactly ONE distinct item, set
+                  dish_name = dish. This OVERRIDES every rule below,
+                  regardless of what the caption says. It does not matter
+                  whether the caption mentions "breakfast", "lunch",
+                  "dinner", "snack", "brunch", or anything else — a solo
+                  item is named after itself.
+                  Examples:
+                    One container of cottage cheese + caption "for breakfast 120g"
+                      → dish_name = "Cottage Cheese" (NOT "Small Breakfast")
+                    One bowl of oatmeal + caption "breakfast"
+                      → dish_name = "Oatmeal" (NOT "Small Breakfast")
+                    One apple + caption "snack"
+                      → dish_name = "Apple" (NOT "Snack")
+                    One salad + caption "for lunch"
+                      → dish_name = "Salad" (NOT "Lunch")
+                    One coffee, one yogurt, one protein bar → dish_name = dish
+
+                RULE 2 — COMPOSED BREAKFAST (2+ items, caption says breakfast):
                     ≤ 3 ingredients  → "Small Breakfast"
                     4–6 ingredients  → "Medium Breakfast"
                     ≥ 7 ingredients  → "Big Breakfast"
                   If the caption doesn't say "breakfast", use "Small/Medium/Big Plate"
                   and the system will correct it later.
-                - LUNCH / DINNER / SNACK: use a descriptive food name, short and clear.
+
+                RULE 3 — COMPOSED LUNCH / DINNER / SNACK (2+ items):
+                  Use a descriptive food name, short and clear.
                     e.g. "Chicken Power Bowl", "Caesar Salad", "Udon Bowl", "Oat Bowl"
                   Never use "Lunch", "Dinner", or "Snack" as the dish_name.
-                - SINGLE STANDALONE ITEM (one apple, one coffee, one yogurt):
-                  dish_name = dish.
   dish        — string, the individual ingredient or component. Keep it SHORT.
                 ALWAYS include a gram (or ml) weight for every ingredient — estimate
                 if not visible. Whole items get typical weights (egg ≈ 60g, small
@@ -151,12 +172,33 @@ If quantities are vague ("a bowl", "some"), make a realistic estimate for an ave
 
 IMPORTANT: Reply with ONLY a JSON array. Each element must have these keys:
   dish_name   — the name of the whole dish/meal. All ingredients of the same dish share the SAME dish_name.
-                - BREAKFAST: use size prefix based on ingredient count:
+
+                NAMING PRIORITY — check rules in this order and STOP at the
+                first one that applies. Do NOT fall through to later rules.
+
+                RULE 1 (HIGHEST PRIORITY) — SINGLE STANDALONE ITEM:
+                  If the user describes exactly ONE distinct item, set
+                  dish_name = dish. This OVERRIDES every rule below,
+                  regardless of what the user's message says about meal
+                  type. It does not matter whether they mention
+                  "breakfast", "lunch", "dinner", "snack", "brunch", or
+                  anything else — a solo item is named after itself.
+                  Examples:
+                    "for breakfast I had 120g of cottage cheese"
+                      → dish_name = "Cottage Cheese" (NOT "Small Breakfast")
+                    "one apple as a snack"
+                      → dish_name = "Apple" (NOT "Snack")
+                    "just an oatmeal bowl for breakfast"
+                      → dish_name = "Oatmeal" (NOT "Small Breakfast")
+                    "a salad for lunch" → dish_name = "Salad" (NOT "Lunch")
+
+                RULE 2 — COMPOSED BREAKFAST (2+ items, user says breakfast):
                     ≤3 → "Small Breakfast", 4–6 → "Medium Breakfast", ≥7 → "Big Breakfast"
                   If not clear it's breakfast, use "Small/Medium/Big Plate".
-                - LUNCH / DINNER / SNACK: descriptive food name (e.g. "Chicken Bowl", "Pasta").
+
+                RULE 3 — COMPOSED LUNCH / DINNER / SNACK (2+ items):
+                  Descriptive food name (e.g. "Chicken Bowl", "Pasta").
                   Never use "Lunch", "Dinner", or "Snack" as dish_name.
-                - Single standalone item: dish_name = dish.
   dish        — the individual ingredient, SHORT + always include a gram/ml weight.
                 Estimate weight for whole items (egg ≈ 60g, banana ≈ 120g, small avocado half ≈ 70g).
                 "Rolled oats 80g" → "Oats 80g", "Banana 1 medium" → "Banana 120g",
