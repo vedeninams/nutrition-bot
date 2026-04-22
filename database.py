@@ -262,66 +262,94 @@ def get_last_meal_today(user_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def _meal_window(now: datetime) -> tuple[str, datetime]:
+    """
+    Return (window_meal_type, window_start) for the meal window containing
+    `now`. Four windows, Berlin wall-clock:
+        04:00 → 11:29   breakfast
+        11:30 → 15:59   lunch
+        16:00 → 22:59   dinner
+        23:00 → 03:59   snack      (night, spans midnight)
+    The night window started at 23:00 the PREVIOUS calendar day when `now`
+    is between 00:00 and 03:59.
+    """
+    from datetime import time as _time
+    minutes = now.hour * 60 + now.minute
+    today = now.date()
+    if 4 * 60 <= minutes < 11 * 60 + 30:
+        return ("breakfast", datetime.combine(today, _time(4, 0)))
+    if 11 * 60 + 30 <= minutes < 16 * 60:
+        return ("lunch", datetime.combine(today, _time(11, 30)))
+    if 16 * 60 <= minutes < 23 * 60:
+        return ("dinner", datetime.combine(today, _time(16, 0)))
+    if minutes >= 23 * 60:
+        return ("snack", datetime.combine(today, _time(23, 0)))
+    # 00:00 – 03:59 → night window opened at 23:00 the day before
+    return ("snack", datetime.combine(today - timedelta(days=1), _time(23, 0)))
+
+
 def classify_meal_type(now: datetime, last_meal: Optional[dict] = None) -> str:
     """
     Fallback meal classification — used only when the user's caption does NOT
     mention a meal type. Caption always wins; this is Tier 2.
 
-    Rules (no kcal/size involvement):
+    The day is divided into four meal windows (Berlin wall-clock):
+        04:00 → 11:29   breakfast
+        11:30 → 15:59   lunch
+        16:00 → 22:59   dinner
+        23:00 → 03:59   snack        (night snack, stored as "snack")
 
-      If there IS a prior meal logged earlier today, the 90-min rule decides:
-        - gap ≤ 90 minutes → inherit the prior meal's meal_type
-                             (a banana 30 min after breakfast is still
-                             breakfast)
-        - gap >  90 minutes → snack
-                             (a banana 2 hours after breakfast is a snack,
-                             even if the clock still says "breakfast time")
+    Within each window:
+      1. The FIRST meal logged in the window takes the window's meal_type
+         (breakfast / lunch / dinner / snack for the night window).
+      2. A subsequent meal logged ≤ 90 min after the previous meal inherits
+         that meal's meal_type.
+      3. A subsequent meal logged > 90 min after the previous meal is a
+         snack — even if the clock still says "breakfast time".
 
-      If there is NO prior meal today (first log of the day), classify by
-      Berlin wall-clock time-of-day window:
-           04:00 → 11:29  → breakfast
-           11:30 → 15:59  → lunch
-           16:00 → 22:59  → dinner
-           23:00 → 03:59  → snack    (night snack, stored as "snack")
+    Crossing a window boundary RESETS the anchor: the first meal in the new
+    window takes the new window's meal_type regardless of how long ago the
+    previous meal was.
 
-    The 04:00 boundary belongs to breakfast (breakfast wins over the night
-    snack window from 04:00 onwards).
+    Example day:
+      07:00 eggs      → first in breakfast window        → breakfast
+      09:00 banana    → 120 min after eggs (>90)         → snack
+      12:30 soup      → first in lunch window            → lunch
+      15:30 apple     → 180 min after soup (>90)         → snack
+      19:00 chicken   → first in dinner window           → dinner
+      21:15 chocolate → 135 min after chicken (>90)      → snack
 
     Args:
-      now:       the current timestamp (used for time-of-day lookup).
-      last_meal: the most recent meal logged earlier TODAY, or None.
+      now:       the current timestamp.
+      last_meal: the most recent meal logged by this user, or None.
                  Must provide keys "logged_at" (ISO string or datetime) and
                  "meal_type".
 
     Returns one of: "breakfast", "lunch", "dinner", "snack".
     """
-    # If there's a prior meal today, the 90-min rule decides — ignore the
-    # time-of-day window entirely.
-    if last_meal is not None:
-        raw = last_meal.get("logged_at")
-        try:
-            prior = raw if isinstance(raw, datetime) else datetime.fromisoformat(raw)
-        except (TypeError, ValueError):
-            prior = None
-        if prior is not None:
-            if (now - prior) <= timedelta(minutes=90):
-                inherited = last_meal.get("meal_type")
-                if inherited in ("breakfast", "lunch", "dinner", "snack"):
-                    return inherited
-                # Unknown prior meal_type → fall through to time-of-day
-            else:
-                return "snack"
-        # Malformed logged_at → fall through to time-of-day as a safe default
+    window_type, window_start = _meal_window(now)
 
-    # First meal of the day (or malformed prior) — classify by time window.
-    minutes = now.hour * 60 + now.minute
-    if 4 * 60 <= minutes < 11 * 60 + 30:      # 04:00 → 11:29
-        return "breakfast"
-    if 11 * 60 + 30 <= minutes < 16 * 60:     # 11:30 → 15:59
-        return "lunch"
-    if 16 * 60 <= minutes < 23 * 60:          # 16:00 → 22:59
-        return "dinner"
-    return "snack"                            # 23:00 → 03:59
+    if last_meal is None:
+        return window_type
+
+    raw = last_meal.get("logged_at")
+    try:
+        prior = raw if isinstance(raw, datetime) else datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return window_type   # malformed timestamp → safe default
+
+    # Prior meal is in an earlier window → this is the first in the new
+    # window, so take the window's default meal_type.
+    if prior < window_start:
+        return window_type
+
+    # Prior meal is in the SAME window — apply the 90-min rule.
+    if (now - prior) <= timedelta(minutes=90):
+        inherited = last_meal.get("meal_type")
+        if inherited in ("breakfast", "lunch", "dinner", "snack"):
+            return inherited
+        return window_type   # unknown prior value → window default
+    return "snack"           # >90 min inside the same window
 
 
 # ─────────────────────────────────────────────────────────────────────────────
