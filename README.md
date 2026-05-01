@@ -25,6 +25,14 @@ On top of that, if you cross 80% of your daily calorie goal during the day, the 
 
 Everything else is on-demand — you send a photo or a message, the bot replies. No silent tracking, no surprise pings outside the times above.
 
+## Architecture reference
+
+**[`ARCHITECTURE.md`](./ARCHITECTURE.md)** is the source of truth for how
+the codebase is organized — every script, every public function, when it's
+called, and how the modules fit together. Read it before changing anything;
+update it in the same commit when behaviour, schema, prompts, triggers, file
+layout, or cron change.
+
 ## Project structure
 
 ```
@@ -34,8 +42,11 @@ nutrition-bot/
 ├── advisor.py             ← Smart replies, summaries, weekly review
 ├── database.py            ← SQLite: all data storage
 ├── wiki.py                ← Per-user long-term memory (markdown wiki)
+├── lint.py                ← Background tidy pass over the wiki
+├── contradictions.py      ← Cross-page conflict detection + resolution
 ├── wiki_instructions.md   ← Schema/rulebook for the LLM wiki maintainer
 ├── wiki_templates/        ← Template pages copied when a user first joins
+├── ARCHITECTURE.md        ← Detailed architecture reference (read me first)
 ├── .env.example           ← Template for secrets
 ├── requirements.txt
 └── README.md
