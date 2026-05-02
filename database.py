@@ -455,22 +455,11 @@ def log_meal_items(user_id: int, items: list[dict], source: str = "photo") -> li
         )
         ids.append(meal_id)
 
-    # If Claude used "Plate" as placeholder (no caption meal_type) and the
-    # batch was classified as breakfast, replace "Plate" with "Breakfast".
-    # Only applies to breakfast — lunch/dinner/snack use descriptive names.
-    if ids and batch_meal_type == "breakfast":
-        conn = get_conn()
-        with conn:
-            conn.execute(
-                """UPDATE meals SET dish_name = REPLACE(dish_name, 'Plate', 'Breakfast')
-                   WHERE id IN ({})
-                     AND dish_name LIKE '%Plate%'""".format(
-                    ",".join("?" * len(ids))
-                ),
-                (*ids,)
-            )
-        conn.close()
-
+    # Note: there's deliberately no post-process that adjusts dish_name
+    # based on batch_meal_type. As of issue #13, dish_name and meal_type
+    # are independent fields — dish_name describes WHAT'S ON THE PLATE
+    # and meal_type describes WHEN IT WAS EATEN. The analyzer prompt is
+    # the single source of truth for naming; we don't override it here.
     return ids
 
 

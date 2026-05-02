@@ -119,9 +119,10 @@ Picture one user message: a photo of a salad with caption *"for lunch"*.
 4. Back in `handle_photo`, items are passed to `database.log_meal_items`.
    That function classifies `meal_type` **once** for the whole batch
    (caption-detected if Opus emitted one, else the time-of-day + 90-min
-   rule), then inserts one meal row per ingredient. If the caption didn't
-   supply a `meal_type` and the batch landed as breakfast, any "Plate"
-   placeholder `dish_name` is renamed "Breakfast".
+   rule), then inserts one meal row per ingredient. `dish_name` and
+   `meal_type` are independent fields — `dish_name` describes what's on
+   the plate, `meal_type` describes when it was eaten. The system does
+   not rename `dish_name` based on `meal_type` (or vice versa).
 5. A short text summary of what was logged (`[Photo logged (photo): Greens
    60g (30 kcal), …]`) is appended to the `conversation_messages` table so
    later text turns like *"actually 600g"* have a referent.
@@ -492,9 +493,11 @@ from becoming its own siblings' "prior meal" mid-insert.
 - **Tier 1 wins:** if any item dict has `meal_type` set (from caption
   detection), that becomes the batch's `meal_type`. Otherwise
   `classify_meal_type` runs against state BEFORE the batch.
-- **Post-process:** if Claude used "Plate" as a placeholder `dish_name`
-  and the batch was classified as breakfast, every "Plate" → "Breakfast"
-  rename happens in one UPDATE.
+- **No `dish_name` post-processing.** `dish_name` and `meal_type` are
+  independent fields with separate jobs (see §3.3 and the analyzer
+  prompts in §7.1). The analyzer is the single source of truth for
+  naming; `log_meal_items` does not adjust `dish_name` based on
+  `meal_type`.
 
 **Called from:** `telegram_bot.handle_photo`, `telegram_bot.handle_text`
 (`log_text` and `add_items` branches).
@@ -742,15 +745,28 @@ spells out the JSON output schema and the rules the model must follow.
 nutrition/UX behaviour you want to change probably lives here.
 
 - `FOOD_SYSTEM_PROMPT` — used by `analyze_food_photo`. Identifies every
-  distinct component of a plate, names the dish, applies the **single-item
-  rule** (one apple → `dish_name="Apple"`, not `"Snack"`), embeds gram
-  weights, handles countable multi-piece items with the `× Npcs` marker.
+  distinct component of a plate, names the dish, embeds gram weights,
+  handles countable multi-piece items with the `× Npcs` marker. Two
+  naming rules:
+    - **Rule 1 (single standalone item):** one apple →
+      `dish_name = "Apple"`, regardless of caption.
+    - **Rule 2 (composed dish, 2+ items):** descriptive name where
+      possible (`"Caesar Salad"`, `"Udon Bowl"`, `"Avocado Toast"`),
+      otherwise size-prefixed `"Small Plate"` / `"Medium Plate"` /
+      `"Big Plate"` by ingredient count. Applies regardless of caption.
+  The prompt's anti-hallucination clause forbids the words
+  `"Breakfast"`, `"Lunch"`, `"Dinner"`, or `"Snack"` inside `dish_name`
+  — those words belong in the `meal_type` field, never the `dish_name`.
+  `meal_type` comes ONLY from the user's caption; if the caption is
+  silent, `meal_type` is `null` and `database.classify_meal_type`
+  fills it in from time of day (see §3.3).
 - `LABEL_SYSTEM_PROMPT` — used by `analyze_label_photo`. Reads the
   nutrition table, scales macros to the user's portion size (caption →
   label serving → realistic per-product default in that order), always
   embeds a portion weight in the dish string.
-- `TEXT_SYSTEM_PROMPT` — used by `analyze_text`. Same shape as the photo
-  prompt but for plain-text descriptions.
+- `TEXT_SYSTEM_PROMPT` — used by `analyze_text`. Same naming rules,
+  same anti-hallucination clause as the photo prompt, applied to
+  plain-text descriptions instead of images.
 - `CORRECTION_SYSTEM_PROMPT` — used by `resolve_correction`. The
   *"how to interpret a correction"* rulebook; lists eight action types
   (`update`, `update_many`, `delete`, `delete_many`, `scale_dish`,
