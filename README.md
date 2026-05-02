@@ -2,6 +2,12 @@
 
 A personal Telegram nutritionist. Send photos of food or nutrition labels and it logs calories + macros automatically.
 
+## Introduction
+
+Winter 2026: I stepped on a cactus in Tenerife. Two months without proper training and a few extra kilos later, I wanted to come back into shape by being mindful and gentle about what I eat, not exhausting myself with strict diets.
+
+Classic buy-vs-build moment. Plenty of nutrition apps exist, but I felt something big was changing in AI roughly since December 2025 and wanted to experience the new tools first-hand, not just read about them. As a Technical Product Manager in a Platform team I work with engineers every day; keeping my hands on the craft helps me speak their language. So I built it myself — and here we are.
+
 ## Features
 
 - 📸 **Food photo** → AI identifies every item on the plate and estimates calories
