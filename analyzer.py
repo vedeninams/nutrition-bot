@@ -59,17 +59,35 @@ Each element must have exactly these keys:
                       → dish_name = "Salad" (NOT "Lunch")
                     One coffee, one yogurt, one protein bar → dish_name = dish
 
-                RULE 2 — COMPOSED BREAKFAST (2+ items, caption says breakfast):
-                    ≤ 3 ingredients  → "Small Breakfast"
-                    4–6 ingredients  → "Medium Breakfast"
-                    ≥ 7 ingredients  → "Big Breakfast"
-                  If the caption doesn't say "breakfast", use "Small/Medium/Big Plate"
-                  and the system will correct it later.
+                RULE 2 — COMPOSED DISH (2+ items):
+                  dish_name describes WHAT'S ON THE PLATE, never when it
+                  was eaten.
+                  - First, try a descriptive food name based on the contents:
+                      "Caesar Salad", "Udon Bowl", "Avocado Toast",
+                      "Chicken Power Bowl", "Greek Yogurt Bowl",
+                      "Oatmeal Bowl", "Pasta Carbonara", etc.
+                  - If the items don't form a recognizable named dish
+                    (random mix of things), fall back to a size-prefixed
+                    "Plate" by ingredient count:
+                      ≤ 3 ingredients  → "Small Plate"
+                      4–6 ingredients  → "Medium Plate"
+                      ≥ 7 ingredients  → "Big Plate"
+                  This applies REGARDLESS of caption — same dish_name
+                  approach whether the caption mentions a meal or not.
 
-                RULE 3 — COMPOSED LUNCH / DINNER / SNACK (2+ items):
-                  Use a descriptive food name, short and clear.
-                    e.g. "Chicken Power Bowl", "Caesar Salad", "Udon Bowl", "Oat Bowl"
-                  Never use "Lunch", "Dinner", or "Snack" as the dish_name.
+                CRITICAL ANTI-HALLUCINATION RULE — dish_name and meal_type
+                are SEPARATE fields with separate jobs:
+                  - dish_name = WHAT'S ON THE PLATE (food). NEVER write
+                    "Breakfast", "Lunch", "Dinner", or "Snack" inside
+                    dish_name — even if the food visually looks
+                    breakfast-y (eggs, oatmeal, coffee, yogurt, toast),
+                    lunch-y, or dinner-y. The dish_name is always about
+                    the food itself, never about meal time.
+                  - meal_type = WHEN IT WAS EATEN. Comes ONLY from the
+                    user's caption. If the caption is silent about meal
+                    time, set meal_type = null. Do NOT infer meal_type
+                    from what the food visually resembles — the system
+                    fills it in from time of day when meal_type is null.
   dish        — string, the individual ingredient or component. Keep it SHORT.
                 ALWAYS include a gram (or ml) weight for every ingredient — estimate
                 if not visible. Whole items get typical weights (egg ≈ 60g, small
@@ -105,7 +123,7 @@ Each element must have exactly these keys:
   carbs_g     — number
   sugar_g     — number
   confidence  — one of: "high", "medium", "low"
-  meal_type   — detect from the caption: "breakfast", "lunch", "dinner", "snack", or null if not mentioned
+  meal_type   — comes ONLY from the user's caption: "breakfast", "lunch", "dinner", "snack", or null if the caption is silent about meal time. Never infer from photo content (see CRITICAL ANTI-HALLUCINATION RULE above).
 
 Example (a plate of udon + a side apple):
 [
@@ -115,10 +133,24 @@ Example (a plate of udon + a side apple):
   {"dish_name": "Apple", "dish": "Apple 120g", "kcal": 80, "protein_g": 0, "fat_g": 0, "carbs_g": 21, "sugar_g": 15, "confidence": "high", "meal_type": "lunch"}
 ]
 
-Example with a countable multi-piece item — breakfast with 2 fried eggs + avocado:
+Example with a countable multi-piece item — caption "for breakfast", 2 fried eggs + avocado:
 [
-  {"dish_name": "Medium Breakfast", "dish": "Fried egg × 2pcs 120g", "kcal": 180, "protein_g": 12, "fat_g": 14, "carbs_g": 0, "sugar_g": 0, "confidence": "high", "meal_type": "breakfast"},
-  {"dish_name": "Medium Breakfast", "dish": "Avocado 80g", "kcal": 128, "protein_g": 2, "fat_g": 12, "carbs_g": 7, "sugar_g": 1, "confidence": "high", "meal_type": "breakfast"}
+  {"dish_name": "Eggs and Avocado", "dish": "Fried egg × 2pcs 120g", "kcal": 180, "protein_g": 12, "fat_g": 14, "carbs_g": 0, "sugar_g": 0, "confidence": "high", "meal_type": "breakfast"},
+  {"dish_name": "Eggs and Avocado", "dish": "Avocado 80g", "kcal": 128, "protein_g": 2, "fat_g": 12, "carbs_g": 7, "sugar_g": 1, "confidence": "high", "meal_type": "breakfast"}
+]
+
+Example — same eggs and avocado photo but NO caption:
+[
+  {"dish_name": "Eggs and Avocado", "dish": "Fried egg × 2pcs 120g", "kcal": 180, "protein_g": 12, "fat_g": 14, "carbs_g": 0, "sugar_g": 0, "confidence": "high", "meal_type": null},
+  {"dish_name": "Eggs and Avocado", "dish": "Avocado 80g", "kcal": 128, "protein_g": 2, "fat_g": 12, "carbs_g": 7, "sugar_g": 1, "confidence": "high", "meal_type": null}
+]
+Note: dish_name describes the food, not the meal time. meal_type is null because the caption was silent — the system fills it in from time of day. Do NOT infer "breakfast" from the photo content.
+
+Example — random plate of 5 items, no caption (no obvious named dish):
+[
+  {"dish_name": "Medium Plate", "dish": "Boiled egg 60g", ..., "meal_type": null},
+  {"dish_name": "Medium Plate", "dish": "Cheese 25g", ..., "meal_type": null},
+  ... (5 ingredients total)
 ]
 
 If you genuinely cannot identify anything, return an empty array [].
@@ -192,13 +224,30 @@ IMPORTANT: Reply with ONLY a JSON array. Each element must have these keys:
                       → dish_name = "Oatmeal" (NOT "Small Breakfast")
                     "a salad for lunch" → dish_name = "Salad" (NOT "Lunch")
 
-                RULE 2 — COMPOSED BREAKFAST (2+ items, user says breakfast):
-                    ≤3 → "Small Breakfast", 4–6 → "Medium Breakfast", ≥7 → "Big Breakfast"
-                  If not clear it's breakfast, use "Small/Medium/Big Plate".
+                RULE 2 — COMPOSED DISH (2+ items):
+                  dish_name describes WHAT WAS EATEN, never when.
+                  - First, try a descriptive food name based on the
+                    contents: "Chicken Bowl", "Pasta Carbonara",
+                    "Caesar Salad", "Oatmeal Bowl", "Avocado Toast", etc.
+                  - If the items don't form a recognizable named dish
+                    (random mix of things), fall back to a size-prefixed
+                    "Plate" by ingredient count:
+                      ≤3 → "Small Plate", 4–6 → "Medium Plate", ≥7 → "Big Plate"
+                  This applies REGARDLESS of whether the user mentions a
+                  meal time — same dish_name approach either way.
 
-                RULE 3 — COMPOSED LUNCH / DINNER / SNACK (2+ items):
-                  Descriptive food name (e.g. "Chicken Bowl", "Pasta").
-                  Never use "Lunch", "Dinner", or "Snack" as dish_name.
+                CRITICAL ANTI-HALLUCINATION RULE — dish_name and meal_type
+                are SEPARATE fields:
+                  - dish_name = WHAT WAS EATEN (food). NEVER write
+                    "Breakfast", "Lunch", "Dinner", or "Snack" inside
+                    dish_name — even if the user mentions one of those
+                    words and even if the food sounds breakfast-y. The
+                    dish_name is always about the food itself.
+                  - meal_type = WHEN. Comes ONLY from the user's words.
+                    If the user doesn't mention a meal time, set
+                    meal_type = null. Do NOT infer meal_type from what
+                    the food sounds like — the system fills it in from
+                    time of day when meal_type is null.
   dish        — the individual ingredient, SHORT + always include a gram/ml weight.
                 Estimate weight for whole items (egg ≈ 60g, banana ≈ 120g, small avocado half ≈ 70g).
                 "Rolled oats 80g" → "Oats 80g", "Banana 1 medium" → "Banana 120g",
@@ -218,12 +267,15 @@ IMPORTANT: Reply with ONLY a JSON array. Each element must have these keys:
                 row with the total weight — never use "× Npcs" for bulk foods.
   kcal, protein_g, fat_g, carbs_g, sugar_g, confidence, meal_type
 
-For meal_type detect it from the user's words:
+For meal_type, read the user's actual words (NOT the food they mention):
 - "for breakfast", "breakfast" → "breakfast"
 - "for lunch", "lunch" → "lunch"
 - "for dinner", "dinner", "supper" → "dinner"
 - "snack", "quick bite" → "snack"
-- If not mentioned, use null (the app will guess from time of day)
+- If not mentioned, use null. The app fills it in from time of day.
+  Do NOT infer meal_type from what the food sounds like (oatmeal does
+  not automatically mean breakfast; pasta does not automatically mean
+  dinner). See the CRITICAL ANTI-HALLUCINATION RULE above.
 
 Example — "I had oatmeal with banana and honey, and also a coffee":
 [
