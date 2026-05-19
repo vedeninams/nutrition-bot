@@ -20,6 +20,7 @@ import os
 import sys
 import io
 
+import anthropic
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
@@ -54,6 +55,198 @@ if not BOT_TOKEN:
 # only to the first photo.  We cache it here so subsequent photos in the same
 # album inherit the same caption (and therefore the same meal_type hint).
 _album_caption_cache: dict[str, str] = {}   # media_group_id → caption text
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Transient-error recovery (issue #18)
+#
+# When an Anthropic API call fails with a transient error (HTTP 529 overload,
+# 503/504 gateway, rate-limit, network blip), the SDK already retries up to
+# ~30 seconds in-process — that handles ~99% of cases silently. The layer
+# below catches the remaining cases where 30s wasn't enough.
+#
+# Design:
+#   - Each LLM-using branch in handle_text wraps its body in _run_with_recovery.
+#   - On transient API failure: send a friendly "I'm still working on it" reply
+#     that includes the user's original text (so they don't have to retype).
+#     Then schedule a background task that periodically retries the same work
+#     for several more minutes before giving up.
+#   - One pending retry per user — a new message from the same user cancels
+#     the previous pending retry (latest message wins).
+#   - Permanent (non-transient) errors fall through and are reported via the
+#     existing log/reply machinery in each branch.
+#
+# Limitation: pending retries live in process memory only. A bot restart
+# during an outage drops them. A persistent on-disk queue would survive
+# restarts; out of scope for v1 per the issue description.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Background retries are spaced 30s apart for up to 6 attempts → ~3 min of
+# silent background recovery on top of the SDK's ~30s of inline retry.
+_BG_RETRY_INTERVAL_S = 30
+_BG_RETRY_MAX_ATTEMPTS = 6
+
+# One pending background retry task per user. New work cancels the old task.
+_pending_retries: dict[int, asyncio.Task] = {}
+
+
+def _is_transient_api_error(e: Exception) -> bool:
+    """True if `e` is the kind of transient API/network error worth retrying.
+
+    Covers: HTTP 502/503/504 gateway errors, HTTP 529 overload, rate-limit,
+    connection blips, request timeouts. Anything else (auth, billing, bad
+    request, our bugs) is permanent and gets reported normally.
+    """
+    if isinstance(e, anthropic.APIStatusError):
+        return e.status_code in (502, 503, 504, 529)
+    if isinstance(e, (
+        anthropic.RateLimitError,
+        anthropic.APIConnectionError,
+        anthropic.APITimeoutError,
+    )):
+        return True
+    return False
+
+
+def _truncate_for_echo(text: str, limit: int = 200) -> str:
+    """Shorten user text for inclusion in friendly retry messages."""
+    if not text:
+        return ""
+    return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+
+async def _send_overload_ack(update: Update, original_text: str) -> None:
+    """First friendly message — sent when the inline SDK retry exhausts and
+    we start background retries. Echoes the user's original input so they
+    don't have to remember what they wrote.
+    """
+    snip = _truncate_for_echo(original_text)
+    body = (
+        "⏳ Anthropic is busy right now. I haven't lost what you sent — "
+        "I'll keep trying in the background and reply when it's through.\n\n"
+        f"_Original: {snip}_" if snip else
+        "⏳ Anthropic is busy right now. I'll keep trying in the background "
+        "and reply when it's through."
+    )
+    await _send(update, body, parse_mode=ParseMode.MARKDOWN)
+
+
+async def _send_overload_giveup(update: Update, original_text: str) -> None:
+    """Final friendly message — sent when background retries are also
+    exhausted. Includes original text so the user can resend without
+    retyping.
+    """
+    snip = _truncate_for_echo(original_text)
+    if snip:
+        body = (
+            "😕 Anthropic stayed busy for too long — I couldn't get through "
+            "after several minutes of retrying. Here's what you sent so you "
+            "don't have to retype:\n\n"
+            f"_{snip}_\n\n"
+            "Try again in a few minutes."
+        )
+    else:
+        body = (
+            "😕 Anthropic stayed busy for too long. Please try again in a "
+            "few minutes."
+        )
+    await _send(update, body, parse_mode=ParseMode.MARKDOWN)
+
+
+async def _background_retry(
+    user_id: int,
+    update: Update,
+    original_text: str,
+    work_fn,
+) -> None:
+    """Periodically retry `work_fn` while Anthropic is overloaded.
+
+    Sleeps _BG_RETRY_INTERVAL_S between attempts, up to _BG_RETRY_MAX_ATTEMPTS.
+    If `work_fn` succeeds, it has already sent its own reply — we just exit.
+    If it fails permanently (non-transient), we give up immediately with the
+    final friendly message. If we run out of attempts, same final message.
+    """
+    try:
+        for attempt in range(1, _BG_RETRY_MAX_ATTEMPTS + 1):
+            await asyncio.sleep(_BG_RETRY_INTERVAL_S)
+            try:
+                await work_fn()
+                log.info(
+                    f"background retry user={user_id} attempt={attempt} succeeded"
+                )
+                return
+            except Exception as e:
+                if not _is_transient_api_error(e):
+                    log.exception(
+                        f"background retry user={user_id} attempt={attempt} "
+                        f"permanent error: {e!r}"
+                    )
+                    await _send_overload_giveup(update, original_text)
+                    return
+                log.warning(
+                    f"background retry user={user_id} attempt={attempt} "
+                    f"still transient: {e!r}"
+                )
+        # Exhausted all attempts and they were all transient.
+        log.warning(
+            f"background retry user={user_id} exhausted "
+            f"{_BG_RETRY_MAX_ATTEMPTS} attempts; giving up"
+        )
+        await _send_overload_giveup(update, original_text)
+    except asyncio.CancelledError:
+        # Cancelled because the user sent a new message; that new message
+        # replaces this pending work. Don't send any more replies for the
+        # old one — silently exit.
+        log.info(f"background retry user={user_id} cancelled (newer message arrived)")
+        raise
+    except Exception as e:
+        log.exception(f"background retry user={user_id} crashed: {e!r}")
+    finally:
+        _pending_retries.pop(user_id, None)
+
+
+async def _run_with_recovery(
+    update: Update,
+    original_text: str,
+    work_fn,
+) -> None:
+    """Run `work_fn` (a no-arg async function that does the whole branch
+    body — LLM call, DB writes, sending the reply). If it fails with a
+    transient API error, acknowledge the user with their original text and
+    schedule background retries. Permanent errors propagate to the caller.
+
+    work_fn is responsible for sending its OWN successful reply (we don't
+    know what shape its output takes). The recovery layer only handles the
+    error path.
+    """
+    user_id = update.effective_user.id
+
+    # Cancel any pending retry from this user's previous message — the new
+    # message replaces it.
+    old_task = _pending_retries.pop(user_id, None)
+    if old_task and not old_task.done():
+        old_task.cancel()
+
+    try:
+        await work_fn()
+        return
+    except Exception as e:
+        if not _is_transient_api_error(e):
+            # Permanent error — let the caller's existing logging/handling
+            # surface it. We don't wrap it in a friendly message because it
+            # might be a real bug worth showing the original exception for.
+            raise
+        log.warning(
+            f"inline retry exhausted for user={user_id}: {e!r}; "
+            f"falling back to background retry"
+        )
+
+    # Inline (SDK) retries didn't get through. Acknowledge + schedule background.
+    await _send_overload_ack(update, original_text)
+    task = asyncio.create_task(
+        _background_retry(user_id, update, original_text, work_fn)
+    )
+    _pending_retries[user_id] = task
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -451,49 +644,50 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await tg_file.download_to_memory(buf)
     image_bytes = buf.getvalue()
 
-    try:
+    # The "original text" for the recovery layer is the caption — or a
+    # placeholder if there wasn't one, since we can't echo the photo bytes
+    # back to the user in a Telegram text reply.
+    echo_text = caption or "your photo"
+
+    async def _work_photo():
         items, source = analyzer.analyze_photo(image_bytes, caption)
-    except Exception as e:
-        log.error(f"analyze_photo failed: {e}")
-        await _send(update, 
-            "😕 Something went wrong analyzing the photo. Please try again."
-        )
-        return
 
-    if not items:
-        await _send(update, 
-            "🤔 I couldn't identify any food in that photo. "
-            "Try a clearer shot, or tell me what it is in text."
-        )
-        return
+        if not items:
+            await _send(update,
+                "🤔 I couldn't identify any food in that photo. "
+                "Try a clearer shot, or tell me what it is in text."
+            )
+            return
 
-    # Log everything
-    db.log_meal_items(user_id, items, source=source)
+        # Log everything
+        db.log_meal_items(user_id, items, source=source)
 
-    # ── Conversation memory: record a text summary of what the photo logged ──
-    # Photos themselves can't be replayed back to Claude in later turns, so we
-    # store a compact text stand-in. That way a follow-up like "two eggs" or
-    # "remove the salad" has a referent in the conversation history.
-    try:
-        parts = []
-        for i in items:
-            name = i.get("dish") or i.get("dish_name") or "item"
-            kcal = i.get("kcal")
-            if kcal:
-                parts.append(f"{name} ({kcal:.0f} kcal)")
-            else:
-                parts.append(str(name))
-        total_kcal = sum(i.get("kcal", 0) for i in items)
-        summary = f"[Photo logged ({source}): {', '.join(parts)} — total {total_kcal:.0f} kcal]"
-        if caption:
-            summary = f"[Caption: {caption}] {summary}"
-        db.log_message(user_id, "user", summary)
-    except Exception as e:
-        log.warning(f"conversation log (photo summary) failed: {e}")
+        # ── Conversation memory: record a text summary of what the photo logged ──
+        # Photos themselves can't be replayed back to Claude in later turns, so we
+        # store a compact text stand-in. That way a follow-up like "two eggs" or
+        # "remove the salad" has a referent in the conversation history.
+        try:
+            parts = []
+            for i in items:
+                name = i.get("dish") or i.get("dish_name") or "item"
+                kcal = i.get("kcal")
+                if kcal:
+                    parts.append(f"{name} ({kcal:.0f} kcal)")
+                else:
+                    parts.append(str(name))
+            total_kcal = sum(i.get("kcal", 0) for i in items)
+            summary = f"[Photo logged ({source}): {', '.join(parts)} — total {total_kcal:.0f} kcal]"
+            if caption:
+                summary = f"[Caption: {caption}] {summary}"
+            db.log_message(user_id, "user", summary)
+        except Exception as e:
+            log.warning(f"conversation log (photo summary) failed: {e}")
 
-    # Confirmation + alert
-    reply = advisor.log_confirmation(items, user_id)
-    await _send(update, _safe_reply(reply), parse_mode=ParseMode.MARKDOWN)
+        # Confirmation + alert
+        reply = advisor.log_confirmation(items, user_id)
+        await _send(update, _safe_reply(reply), parse_mode=ParseMode.MARKDOWN)
+
+    await _run_with_recovery(update, echo_text, _work_photo)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -620,39 +814,42 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await _send(update, "🤔 I couldn't read the health data. Make sure the Shortcut sends it in the expected format.")
             return
 
-        # Estimate walking calories using saved weight (or parsed weight)
-        user_weight = weight or db.get_latest_weight(user_id) or 70.0
-        existing = db.get_daily_stats(user_id, date_str) or {}
-        workouts = existing.get("workouts") or []
-        profile = wiki.read_wiki_for_prompt(user_id)
+        async def _work_health():
+            # Estimate walking calories using saved weight (or parsed weight)
+            user_weight = weight or db.get_latest_weight(user_id) or 70.0
+            existing = db.get_daily_stats(user_id, date_str) or {}
+            workouts = existing.get("workouts") or []
+            profile = wiki.read_wiki_for_prompt(user_id)
 
-        burn_data = analyzer.estimate_activity_calories(steps, workouts, user_weight, profile)
-        kcal_burned = burn_data.get("total_kcal", 0)
+            burn_data = analyzer.estimate_activity_calories(steps, workouts, user_weight, profile)
+            kcal_burned = burn_data.get("total_kcal", 0)
 
-        db.upsert_daily_stats(
-            user_id=user_id,
-            date_str=date_str,
-            steps=steps,
-            weight_kg=weight,
-            kcal_burned_est=kcal_burned,
-        )
+            db.upsert_daily_stats(
+                user_id=user_id,
+                date_str=date_str,
+                steps=steps,
+                weight_kg=weight,
+                kcal_burned_est=kcal_burned,
+            )
 
-        lines = ["✅ *Health data logged!*"]
-        if weight:
-            lines.append(f"⚖️ Weight: {weight:.1f} kg")
-        if steps:
-            walking_kcal = burn_data.get("walking_kcal", 0)
-            lines.append(f"👟 Steps: {steps:,} (~{walking_kcal:.0f} kcal extra from walking)")
-        bmr = burn_data.get("bmr_kcal", 0)
-        if bmr:
-            lines.append(f"🫀 Resting + sedentary base: ~{bmr:.0f} kcal")
-        if kcal_burned:
-            lines.append(f"🔥 *Total estimated burn: ~{kcal_burned:.0f} kcal*")
-        assumed = burn_data.get("assumed", "")
-        if assumed:
-            lines.append(f"_ℹ️ Assumed: {assumed}_")
+            lines = ["✅ *Health data logged!*"]
+            if weight:
+                lines.append(f"⚖️ Weight: {weight:.1f} kg")
+            if steps:
+                walking_kcal = burn_data.get("walking_kcal", 0)
+                lines.append(f"👟 Steps: {steps:,} (~{walking_kcal:.0f} kcal extra from walking)")
+            bmr = burn_data.get("bmr_kcal", 0)
+            if bmr:
+                lines.append(f"🫀 Resting + sedentary base: ~{bmr:.0f} kcal")
+            if kcal_burned:
+                lines.append(f"🔥 *Total estimated burn: ~{kcal_burned:.0f} kcal*")
+            assumed = burn_data.get("assumed", "")
+            if assumed:
+                lines.append(f"_ℹ️ Assumed: {assumed}_")
 
-        await _send(update, "\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+            await _send(update, "\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+        await _run_with_recovery(update, text, _work_health)
         return
 
     # ── iPhone Shortcut: workout / calendar events ────────────────────────────
@@ -665,41 +862,44 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await _send(update, "🤔 I couldn't find any workout entries. Check the Shortcut format.")
             return
 
-        user_weight = db.get_latest_weight(user_id) or 70.0
-        existing = db.get_daily_stats(user_id, _date.today().isoformat()) or {}
-        steps = existing.get("steps")
-        profile = wiki.read_wiki_for_prompt(user_id)
+        async def _work_workouts():
+            user_weight = db.get_latest_weight(user_id) or 70.0
+            existing = db.get_daily_stats(user_id, _date.today().isoformat()) or {}
+            steps = existing.get("steps")
+            profile = wiki.read_wiki_for_prompt(user_id)
 
-        burn_data = analyzer.estimate_activity_calories(steps, workouts, user_weight, profile)
-        kcal_burned = burn_data.get("total_kcal", 0)
+            burn_data = analyzer.estimate_activity_calories(steps, workouts, user_weight, profile)
+            kcal_burned = burn_data.get("total_kcal", 0)
 
-        # Attach kcal estimates back to workout dicts for storage
-        for i, w in enumerate(workouts):
-            estimated = burn_data.get("workouts", [{}])
-            if i < len(estimated):
-                w["kcal_est"] = estimated[i].get("kcal_est", 0)
-                w["intensity_note"] = estimated[i].get("intensity_note", "")
+            # Attach kcal estimates back to workout dicts for storage
+            for i, w in enumerate(workouts):
+                estimated = burn_data.get("workouts", [{}])
+                if i < len(estimated):
+                    w["kcal_est"] = estimated[i].get("kcal_est", 0)
+                    w["intensity_note"] = estimated[i].get("intensity_note", "")
 
-        db.upsert_daily_stats(
-            user_id=user_id,
-            date_str=_date.today().isoformat(),
-            workouts=workouts,
-            kcal_burned_est=kcal_burned,
-        )
+            db.upsert_daily_stats(
+                user_id=user_id,
+                date_str=_date.today().isoformat(),
+                workouts=workouts,
+                kcal_burned_est=kcal_burned,
+            )
 
-        lines = ["✅ *Workouts logged!*"]
-        for w in workouts:
-            from advisor import _workout_emoji
-            emoji = _workout_emoji(w["name"])
-            dur_str = f" — {w['duration_min']} min" if w.get("duration_min") else ""
-            kcal_str = f" — ~{w['kcal_est']:.0f} kcal" if w.get("kcal_est") else ""
-            note = f" _{w['intensity_note']}_" if w.get("intensity_note") else ""
-            lines.append(f"{emoji} {w['name']}{dur_str}{kcal_str}{note}")
-        lines.append(f"\n🔥 Total estimated burn: *~{kcal_burned:.0f} kcal*")
-        if burn_data.get("summary"):
-            lines.append(f"_{burn_data['summary']}_")
+            lines = ["✅ *Workouts logged!*"]
+            for w in workouts:
+                from advisor import _workout_emoji
+                emoji = _workout_emoji(w["name"])
+                dur_str = f" — {w['duration_min']} min" if w.get("duration_min") else ""
+                kcal_str = f" — ~{w['kcal_est']:.0f} kcal" if w.get("kcal_est") else ""
+                note = f" _{w['intensity_note']}_" if w.get("intensity_note") else ""
+                lines.append(f"{emoji} {w['name']}{dur_str}{kcal_str}{note}")
+            lines.append(f"\n🔥 Total estimated burn: *~{kcal_burned:.0f} kcal*")
+            if burn_data.get("summary"):
+                lines.append(f"_{burn_data['summary']}_")
 
-        await _send(update, "\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+            await _send(update, "\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+        await _run_with_recovery(update, text, _work_workouts)
         return
 
     # ── Remember: personal fact or intention to store ────────────────────────
@@ -723,15 +923,19 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ── Natural language: specific past day summary ───────────────────────────
     if intent == "cmd_date_query":
         from datetime import date as _date
-        query_date, label = analyzer.extract_query_date(text, _date.today().isoformat())
-        text_reply = advisor.day_summary(user_id, query_date, label)
-        await _send(update, _safe_reply(text_reply), parse_mode=ParseMode.MARKDOWN)
+        async def _work_date():
+            query_date, label = analyzer.extract_query_date(text, _date.today().isoformat())
+            text_reply = advisor.day_summary(user_id, query_date, label)
+            await _send(update, _safe_reply(text_reply), parse_mode=ParseMode.MARKDOWN)
+        await _run_with_recovery(update, text, _work_date)
         return
 
     # ── Natural language: weekly review ──────────────────────────────────────
     if intent == "cmd_week":
-        text_reply = advisor.weekly_review(user_id)
-        await _send(update, _safe_reply(text_reply), parse_mode=ParseMode.MARKDOWN)
+        async def _work_week():
+            text_reply = advisor.weekly_review(user_id)
+            await _send(update, _safe_reply(text_reply), parse_mode=ParseMode.MARKDOWN)
+        await _run_with_recovery(update, text, _work_week)
         return
 
     # ── Natural language: set/check goal ─────────────────────────────────────
@@ -762,270 +966,270 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # ── Correction ──────────────────────────────────────────────────────────
     if intent == "correction":
-        # Use today's FULL log as the candidate pool, not just the last 10
-        # rows. Rationale: on a busy day (e.g. breakfast + lunch + dinner +
-        # multiple snacks, 15-20 rows) a "last 10 meals" cap pushes the
-        # morning meals out of the resolver's view. When the user then
-        # corrects the morning cottage cheese, Haiku can't see it in history
-        # and hallucinates a meal_id that *is* in the window — which
-        # silently rewrites the wrong row (see 2026-04-20 incident where
-        # "Cottage cheese for breakfast was 100g" overwrote the Borscht
-        # lunch row because id 757 wasn't actually in the candidate set but
-        # Haiku returned it anyway).
-        #
-        # Fall back to recent-10 only if today has no meals at all (rare
-        # edge case: user corrects yesterday's log at 00:01 Berlin).
-        recent = db.get_today_meals(user_id)
-        if not recent:
-            recent = db.get_recent_meals(user_id, limit=10)
-        if not recent:
-            await _send(update,
-                "I don't have any recent meals to correct. Log something first!"
+        async def _work_correction():
+            # Use today's FULL log as the candidate pool, not just the last 10
+            # rows. Rationale: on a busy day (e.g. breakfast + lunch + dinner +
+            # multiple snacks, 15-20 rows) a "last 10 meals" cap pushes the
+            # morning meals out of the resolver's view. When the user then
+            # corrects the morning cottage cheese, Haiku can't see it in history
+            # and hallucinates a meal_id that *is* in the window — which
+            # silently rewrites the wrong row (see 2026-04-20 incident where
+            # "Cottage cheese for breakfast was 100g" overwrote the Borscht
+            # lunch row because id 757 wasn't actually in the candidate set but
+            # Haiku returned it anyway).
+            #
+            # Fall back to recent-10 only if today has no meals at all (rare
+            # edge case: user corrects yesterday's log at 00:01 Berlin).
+            recent = db.get_today_meals(user_id)
+            if not recent:
+                recent = db.get_recent_meals(user_id, limit=10)
+            if not recent:
+                await _send(update,
+                    "I don't have any recent meals to correct. Log something first!"
+                )
+                return
+
+            # Pass the most recent logging batch (e.g. 6 items from one photo)
+            # so Claude knows exactly which IDs form "this dish I just added"
+            last_batch = db.get_last_meal_batch(user_id, window_seconds=120)
+
+            # resolve_correction now returns a LIST — one action per requested change
+            results = analyzer.resolve_correction(text, recent, last_batch=last_batch, conversation=history)
+
+            # Diagnostic logging — when the resolver keeps returning 'none' we want
+            # to see exactly what Haiku was handed and what it said. Kept terse so
+            # journalctl stays readable.
+            log.info(
+                f"correction user={user_id} text={text!r} "
+                f"history_len={len(history) if history else 0} "
+                f"recent_count={len(recent)} last_batch_count={len(last_batch) if last_batch else 0} "
+                f"results={results}"
             )
-            return
 
-        # Pass the most recent logging batch (e.g. 6 items from one photo)
-        # so Claude knows exactly which IDs form "this dish I just added"
-        last_batch = db.get_last_meal_batch(user_id, window_seconds=120)
+            # Integrity guard — build the set of meal_ids that were actually
+            # visible to Haiku. Any `update`/`delete`/`update_many`/`delete_many`
+            # pointing at an id outside this set is a hallucination and must
+            # be rejected BEFORE touching the DB. (batch items are always a
+            # subset of today's log, so `recent` alone is the right anchor.)
+            candidate_ids: set[int] = {m["id"] for m in recent}
 
-        # resolve_correction now returns a LIST — one action per requested change
-        results = analyzer.resolve_correction(text, recent, last_batch=last_batch, conversation=history)
+            def _id_is_valid(mid) -> bool:
+                """Accept only int-coercible ids that match a row we passed to Haiku."""
+                try:
+                    return int(mid) in candidate_ids
+                except (TypeError, ValueError):
+                    return False
 
-        # Diagnostic logging — when the resolver keeps returning 'none' we want
-        # to see exactly what Haiku was handed and what it said. Kept terse so
-        # journalctl stays readable.
-        log.info(
-            f"correction user={user_id} text={text!r} "
-            f"history_len={len(history) if history else 0} "
-            f"recent_count={len(recent)} last_batch_count={len(last_batch) if last_batch else 0} "
-            f"results={results}"
-        )
+            # Filter out "none" actions before processing
+            valid_results = [r for r in results if r.get("action", "none") != "none"]
 
-        # Integrity guard — build the set of meal_ids that were actually
-        # visible to Haiku. Any `update`/`delete`/`update_many`/`delete_many`
-        # pointing at an id outside this set is a hallucination and must
-        # be rejected BEFORE touching the DB. (batch items are always a
-        # subset of today's log, so `recent` alone is the right anchor.)
-        candidate_ids: set[int] = {m["id"] for m in recent}
+            if not valid_results:
+                await _send(update,
+                    "🤔 I'm not sure which meal you want to change. "
+                    "Try being more specific, e.g. \"The feta — it was 70g not 80g. Also remove the hummus.\""
+                )
+                return
 
-        def _id_is_valid(mid) -> bool:
-            """Accept only int-coercible ids that match a row we passed to Haiku."""
-            try:
-                return int(mid) in candidate_ids
-            except (TypeError, ValueError):
-                return False
+            # Execute each correction in order, collect summary lines
+            reply_lines = []
+            goal = wiki.get_daily_kcal(user_id, 2000)
 
-        # Filter out "none" actions before processing
-        valid_results = [r for r in results if r.get("action", "none") != "none"]
+            for result in valid_results:
+                action = result.get("action", "none")
 
-        if not valid_results:
-            await _send(update,
-                "🤔 I'm not sure which meal you want to change. "
-                "Try being more specific, e.g. \"The feta — it was 70g not 80g. Also remove the hummus.\""
-            )
-            return
+                # ── Add MORE of something already logged ─────────────────────────
+                # e.g. bot logged 2 eggs from a photo; user says "there are three
+                # eggs" → resolver emits add_items with one new egg entry.
+                if action == "add_items":
+                    new_items = result.get("items", [])
+                    dish_name = result.get("dish_name", "")
+                    if dish_name and new_items:
+                        # Force the new rows into the existing dish grouping so
+                        # later corrections/edits treat them as one dish.
+                        for it in new_items:
+                            it["dish_name"] = dish_name
+                        try:
+                            db.log_meal_items(user_id, new_items, source="correction")
+                            # Show *what* was added, not just "1 more" — Maria
+                            # asked for the item name to be visible in the reply.
+                            added_desc = ", ".join(
+                                it.get("dish", "item") for it in new_items
+                            )
+                            reply_lines.append(
+                                f"➕ Added *{added_desc}* to *{dish_name}*"
+                            )
+                        except Exception as e:
+                            log.warning(f"add_items failed: {e}")
+                            reply_lines.append(f"⚠️ Couldn't add extra items to *{dish_name}*")
+                    else:
+                        reply_lines.append("⚠️ I didn't have enough info to add the extra item")
 
-        # Execute each correction in order, collect summary lines
-        reply_lines = []
-        goal = wiki.get_daily_kcal(user_id, 2000)
-
-        for result in valid_results:
-            action = result.get("action", "none")
-
-            # ── Add MORE of something already logged ─────────────────────────
-            # e.g. bot logged 2 eggs from a photo; user says "there are three
-            # eggs" → resolver emits add_items with one new egg entry.
-            if action == "add_items":
-                new_items = result.get("items", [])
-                dish_name = result.get("dish_name", "")
-                if dish_name and new_items:
-                    # Force the new rows into the existing dish grouping so
-                    # later corrections/edits treat them as one dish.
-                    for it in new_items:
-                        it["dish_name"] = dish_name
-                    try:
-                        db.log_meal_items(user_id, new_items, source="correction")
-                        # Show *what* was added, not just "1 more" — Maria
-                        # asked for the item name to be visible in the reply.
-                        added_desc = ", ".join(
-                            it.get("dish", "item") for it in new_items
+                # ── Bulk meal type reclassification ──────────────────────────────
+                elif action == "update_many":
+                    meal_ids = result.get("meal_ids", [])
+                    updates = result.get("updates", {})
+                    # Drop any hallucinated ids before writing — see integrity-guard
+                    # note above.  If ALL ids are bad we refuse the whole action.
+                    safe_ids = [mid for mid in meal_ids if _id_is_valid(mid)]
+                    if meal_ids and not safe_ids:
+                        log.warning(
+                            f"update_many rejected: all meal_ids {meal_ids} outside candidate set "
+                            f"{sorted(candidate_ids)} — likely Haiku hallucination"
                         )
                         reply_lines.append(
-                            f"➕ Added *{added_desc}* to *{dish_name}*"
+                            "⚠️ I couldn't confidently identify which entries you meant. "
+                            "Try naming the dish more specifically."
                         )
-                    except Exception as e:
-                        log.warning(f"add_items failed: {e}")
-                        reply_lines.append(f"⚠️ Couldn't add extra items to *{dish_name}*")
-                else:
-                    reply_lines.append("⚠️ I didn't have enough info to add the extra item")
+                    elif safe_ids and updates:
+                        updated = sum(1 for mid in safe_ids if db.update_meal(mid, updates, reason=result.get("reason", "")))
+                        meal_type = updates.get("meal_type", "")
+                        meal_emoji = {"breakfast": "🌅", "lunch": "☀️", "dinner": "🌙", "snack": "🍎"}.get(meal_type, "🍽")
+                        reply_lines.append(f"✅ Updated {updated} items → {meal_emoji} *{meal_type}*")
 
-            # ── Bulk meal type reclassification ──────────────────────────────
-            elif action == "update_many":
-                meal_ids = result.get("meal_ids", [])
-                updates = result.get("updates", {})
-                # Drop any hallucinated ids before writing — see integrity-guard
-                # note above.  If ALL ids are bad we refuse the whole action.
-                safe_ids = [mid for mid in meal_ids if _id_is_valid(mid)]
-                if meal_ids and not safe_ids:
-                    log.warning(
-                        f"update_many rejected: all meal_ids {meal_ids} outside candidate set "
-                        f"{sorted(candidate_ids)} — likely Haiku hallucination"
-                    )
-                    reply_lines.append(
-                        "⚠️ I couldn't confidently identify which entries you meant. "
-                        "Try naming the dish more specifically."
-                    )
-                elif safe_ids and updates:
-                    updated = sum(1 for mid in safe_ids if db.update_meal(mid, updates, reason=result.get("reason", "")))
-                    meal_type = updates.get("meal_type", "")
-                    meal_emoji = {"breakfast": "🌅", "lunch": "☀️", "dinner": "🌙", "snack": "🍎"}.get(meal_type, "🍽")
-                    reply_lines.append(f"✅ Updated {updated} items → {meal_emoji} *{meal_type}*")
+                # ── Remove duplicates ─────────────────────────────────────────────
+                elif action == "delete_duplicates":
+                    dish_name = result.get("dish_name", "")
+                    if dish_name:
+                        deleted = db.delete_duplicate_dishes(user_id, dish_name)
+                        if deleted:
+                            reply_lines.append(f"🗑 Removed {deleted} duplicate(s) of *{dish_name}* — kept first log")
+                        else:
+                            reply_lines.append(f"No duplicates found for *{dish_name}*")
 
-            # ── Remove duplicates ─────────────────────────────────────────────
-            elif action == "delete_duplicates":
-                dish_name = result.get("dish_name", "")
-                if dish_name:
-                    deleted = db.delete_duplicate_dishes(user_id, dish_name)
-                    if deleted:
-                        reply_lines.append(f"🗑 Removed {deleted} duplicate(s) of *{dish_name}* — kept first log")
-                    else:
-                        reply_lines.append(f"No duplicates found for *{dish_name}*")
+                # ── Scale dish to specific gram weight ────────────────────────────
+                elif action == "scale_dish_grams":
+                    dish_name = result.get("dish_name", "")
+                    target_grams = float(result.get("target_grams", 0))
+                    if dish_name and target_grams > 0:
+                        items = db.get_dish_items_today(user_id, dish_name)
+                        current_grams = sum(advisor._parse_grams(i.get("dish", "")) for i in items)
+                        if current_grams > 0:
+                            factor = target_grams / current_grams
+                            db.scale_dish_items(user_id, dish_name, factor)
+                            reply_lines.append(f"✏️ *{dish_name}* adjusted to {target_grams:.0f}g ({int(factor*100)}% of logged)")
+                        else:
+                            reply_lines.append(f"⚠️ Couldn't calculate current grams for *{dish_name}* — try 'I ate X% of that' instead")
 
-            # ── Scale dish to specific gram weight ────────────────────────────
-            elif action == "scale_dish_grams":
-                dish_name = result.get("dish_name", "")
-                target_grams = float(result.get("target_grams", 0))
-                if dish_name and target_grams > 0:
-                    items = db.get_dish_items_today(user_id, dish_name)
-                    current_grams = sum(advisor._parse_grams(i.get("dish", "")) for i in items)
-                    if current_grams > 0:
-                        factor = target_grams / current_grams
-                        db.scale_dish_items(user_id, dish_name, factor)
-                        reply_lines.append(f"✏️ *{dish_name}* adjusted to {target_grams:.0f}g ({int(factor*100)}% of logged)")
-                    else:
-                        reply_lines.append(f"⚠️ Couldn't calculate current grams for *{dish_name}* — try 'I ate X% of that' instead")
+                # ── Scale whole dish by fraction ──────────────────────────────────
+                elif action == "scale_dish":
+                    dish_name = result.get("dish_name", "")
+                    factor = float(result.get("factor", 1.0))
+                    if dish_name and 0.05 <= factor <= 0.99:
+                        updated = db.scale_dish_items(user_id, dish_name, factor)
+                        reply_lines.append(f"✏️ *{dish_name}* adjusted to {int(factor*100)}%")
 
-            # ── Scale whole dish by fraction ──────────────────────────────────
-            elif action == "scale_dish":
-                dish_name = result.get("dish_name", "")
-                factor = float(result.get("factor", 1.0))
-                if dish_name and 0.05 <= factor <= 0.99:
-                    updated = db.scale_dish_items(user_id, dish_name, factor)
-                    reply_lines.append(f"✏️ *{dish_name}* adjusted to {int(factor*100)}%")
-
-            # ── Delete multiple items ─────────────────────────────────────────
-            elif action == "delete_many":
-                meal_ids = result.get("meal_ids", [])
-                dish_name = result.get("dish_name")
-                # Trust dish_name delete only if it returns something, because
-                # delete_by_dish_name is scoped to the user's own rows so it
-                # cannot accidentally hit another meal via a hallucinated id.
-                # For the fallback-by-id path we DO filter to the candidate
-                # set first.
-                safe_ids = [mid for mid in meal_ids if _id_is_valid(mid)]
-                if dish_name:
-                    deleted = db.delete_by_dish_name(user_id, dish_name)
-                    if deleted == 0 and safe_ids:
-                        # dish_name didn't match (wording/casing difference) —
-                        # fall back to the explicit IDs Claude already resolved
+                # ── Delete multiple items ─────────────────────────────────────────
+                elif action == "delete_many":
+                    meal_ids = result.get("meal_ids", [])
+                    dish_name = result.get("dish_name")
+                    # Trust dish_name delete only if it returns something, because
+                    # delete_by_dish_name is scoped to the user's own rows so it
+                    # cannot accidentally hit another meal via a hallucinated id.
+                    # For the fallback-by-id path we DO filter to the candidate
+                    # set first.
+                    safe_ids = [mid for mid in meal_ids if _id_is_valid(mid)]
+                    if dish_name:
+                        deleted = db.delete_by_dish_name(user_id, dish_name)
+                        if deleted == 0 and safe_ids:
+                            # dish_name didn't match (wording/casing difference) —
+                            # fall back to the explicit IDs Claude already resolved
+                            deleted = sum(1 for mid in safe_ids if db.delete_meal(mid))
+                        reply_lines.append(f"🗑 Removed *{dish_name}* ({deleted} items)")
+                    elif safe_ids:
                         deleted = sum(1 for mid in safe_ids if db.delete_meal(mid))
-                    reply_lines.append(f"🗑 Removed *{dish_name}* ({deleted} items)")
-                elif safe_ids:
-                    deleted = sum(1 for mid in safe_ids if db.delete_meal(mid))
-                    reply_lines.append(f"🗑 Removed {deleted} items")
-                elif meal_ids:
-                    # All ids were outside the candidate set — refuse silently
-                    # rather than delete something unrelated.
-                    log.warning(
-                        f"delete_many rejected: ids {meal_ids} outside candidate set "
-                        f"{sorted(candidate_ids)}"
-                    )
-                    reply_lines.append(
-                        "⚠️ I couldn't confidently identify which entries to remove. "
-                        "Try naming the dish."
-                    )
+                        reply_lines.append(f"🗑 Removed {deleted} items")
+                    elif meal_ids:
+                        # All ids were outside the candidate set — refuse silently
+                        # rather than delete something unrelated.
+                        log.warning(
+                            f"delete_many rejected: ids {meal_ids} outside candidate set "
+                            f"{sorted(candidate_ids)}"
+                        )
+                        reply_lines.append(
+                            "⚠️ I couldn't confidently identify which entries to remove. "
+                            "Try naming the dish."
+                        )
 
-            # ── Delete single item ────────────────────────────────────────────
-            elif action == "delete":
-                meal_id = result.get("meal_id")
-                if not _id_is_valid(meal_id):
-                    log.warning(
-                        f"delete rejected: meal_id={meal_id!r} outside candidate set "
-                        f"{sorted(candidate_ids)}"
-                    )
-                    reply_lines.append(
-                        "⚠️ I couldn't confidently find that entry. Try being more specific."
-                    )
-                else:
-                    meal = db.get_meal_by_id(meal_id)
-                    if db.delete_meal(meal_id):
-                        name = meal.get("dish", "item") if meal else "item"
-                        reply_lines.append(f"🗑 Removed *{name}*")
+                # ── Delete single item ────────────────────────────────────────────
+                elif action == "delete":
+                    meal_id = result.get("meal_id")
+                    if not _id_is_valid(meal_id):
+                        log.warning(
+                            f"delete rejected: meal_id={meal_id!r} outside candidate set "
+                            f"{sorted(candidate_ids)}"
+                        )
+                        reply_lines.append(
+                            "⚠️ I couldn't confidently find that entry. Try being more specific."
+                        )
                     else:
-                        reply_lines.append("⚠️ Couldn't find that entry to remove")
+                        meal = db.get_meal_by_id(meal_id)
+                        if db.delete_meal(meal_id):
+                            name = meal.get("dish", "item") if meal else "item"
+                            reply_lines.append(f"🗑 Removed *{name}*")
+                        else:
+                            reply_lines.append("⚠️ Couldn't find that entry to remove")
 
-            # ── Update single item ────────────────────────────────────────────
-            elif action == "update":
-                meal_id = result.get("meal_id")
-                updates = result.get("updates", {})
-                # CRITICAL guard — Haiku has been observed to return a
-                # meal_id that wasn't in the context we gave it, causing
-                # an unrelated row (e.g. lunch Borscht) to be silently
-                # overwritten with update values meant for a different
-                # meal (e.g. breakfast cottage cheese). Reject those before
-                # they reach the DB.
-                if not _id_is_valid(meal_id):
-                    log.warning(
-                        f"update rejected: meal_id={meal_id!r} outside candidate set "
-                        f"{sorted(candidate_ids)}; updates={updates!r} reason={result.get('reason')!r}"
-                    )
-                    reply_lines.append(
-                        "⚠️ I couldn't confidently match that to one of your logged meals. "
-                        "Please re-state which dish, e.g. \"cottage cheese 100g\"."
-                    )
-                elif db.update_meal(meal_id, updates, reason=result.get("reason", "")):
-                    meal = db.get_meal_by_id(meal_id)
-                    name = meal.get("dish", "item") if meal else "item"
-                    new_kcal = meal.get("kcal", "?") if meal else "?"
-                    reply_lines.append(f"✏️ *{name}* → {new_kcal:.0f} kcal")
-                else:
-                    reply_lines.append("⚠️ Couldn't find that entry to update")
+                # ── Update single item ────────────────────────────────────────────
+                elif action == "update":
+                    meal_id = result.get("meal_id")
+                    updates = result.get("updates", {})
+                    # CRITICAL guard — Haiku has been observed to return a
+                    # meal_id that wasn't in the context we gave it, causing
+                    # an unrelated row (e.g. lunch Borscht) to be silently
+                    # overwritten with update values meant for a different
+                    # meal (e.g. breakfast cottage cheese). Reject those before
+                    # they reach the DB.
+                    if not _id_is_valid(meal_id):
+                        log.warning(
+                            f"update rejected: meal_id={meal_id!r} outside candidate set "
+                            f"{sorted(candidate_ids)}; updates={updates!r} reason={result.get('reason')!r}"
+                        )
+                        reply_lines.append(
+                            "⚠️ I couldn't confidently match that to one of your logged meals. "
+                            "Please re-state which dish, e.g. \"cottage cheese 100g\"."
+                        )
+                    elif db.update_meal(meal_id, updates, reason=result.get("reason", "")):
+                        meal = db.get_meal_by_id(meal_id)
+                        name = meal.get("dish", "item") if meal else "item"
+                        new_kcal = meal.get("kcal", "?") if meal else "?"
+                        reply_lines.append(f"✏️ *{name}* → {new_kcal:.0f} kcal")
+                    else:
+                        reply_lines.append("⚠️ Couldn't find that entry to update")
 
-        # Send one combined reply with all changes + updated totals
-        totals = db.get_today_totals(user_id)
-        combined = "\n".join(reply_lines) + f"\n\n{advisor._fmt_totals(totals, goal)}"
-        await _send(update, _safe_reply(combined), parse_mode=ParseMode.MARKDOWN)
+            # Send one combined reply with all changes + updated totals
+            totals = db.get_today_totals(user_id)
+            combined = "\n".join(reply_lines) + f"\n\n{advisor._fmt_totals(totals, goal)}"
+            await _send(update, _safe_reply(combined), parse_mode=ParseMode.MARKDOWN)
+
+        await _run_with_recovery(update, text, _work_correction)
         return
 
     # ── Question ─────────────────────────────────────────────────────────────
     if intent == "question":
-        answer = advisor.answer_question(user_id, text, conversation=history)
-        await _send(update, _safe_reply(answer), parse_mode=ParseMode.MARKDOWN)
-        # Fire-and-forget: let Haiku decide whether this question reveals
-        # something about the user worth filing (usually a self-concern like
-        # "am I low on protein?").  When in doubt it leans self-question.
-        advisor.schedule_ingest(user_id, "question", text, answer)
+        async def _work_question():
+            answer = advisor.answer_question(user_id, text, conversation=history)
+            await _send(update, _safe_reply(answer), parse_mode=ParseMode.MARKDOWN)
+            # Fire-and-forget: let Haiku decide whether this question reveals
+            # something about the user worth filing (usually a self-concern like
+            # "am I low on protein?").  When in doubt it leans self-question.
+            advisor.schedule_ingest(user_id, "question", text, answer)
+        await _run_with_recovery(update, text, _work_question)
         return
 
     # ── Log text description ──────────────────────────────────────────────────
     if intent == "log_text":
-        try:
+        async def _work_log_text():
             items = analyzer.analyze_text(text)
-        except Exception as e:
-            log.exception(f"analyze_text failed: {e}")   # prints full traceback
-            await _send(update, f"😕 Error: {e}")  # show real error in Telegram too
-            return
-
-        if not items:
-            await _send(update, 
-                "🤔 I couldn't figure out what food that describes. "
-                "Try being more specific, e.g. \"oatmeal 80g with banana\"."
-            )
-            return
-
-        db.log_meal_items(user_id, items, source="text")
-        reply = advisor.log_confirmation(items, user_id)
-        await _send(update, _safe_reply(reply), parse_mode=ParseMode.MARKDOWN)
+            if not items:
+                await _send(update,
+                    "🤔 I couldn't figure out what food that describes. "
+                    "Try being more specific, e.g. \"oatmeal 80g with banana\"."
+                )
+                return
+            db.log_meal_items(user_id, items, source="text")
+            reply = advisor.log_confirmation(items, user_id)
+            await _send(update, _safe_reply(reply), parse_mode=ParseMode.MARKDOWN)
+        await _run_with_recovery(update, text, _work_log_text)
         return
 
     # ── Fallback ─────────────────────────────────────────────────────────────
