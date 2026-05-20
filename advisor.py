@@ -19,7 +19,8 @@ import database as db
 import wiki
 
 load_dotenv()   # must happen before Anthropic() reads the env
-client = anthropic.Anthropic()
+# max_retries=6 ≈ 30s of in-process retry on transient errors. See issue #18.
+client = anthropic.Anthropic(max_retries=6)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -905,7 +906,8 @@ _async_client: Optional[anthropic.AsyncAnthropic] = None
 def _get_async_client() -> anthropic.AsyncAnthropic:
     global _async_client
     if _async_client is None:
-        _async_client = anthropic.AsyncAnthropic()
+        # max_retries=6 ≈ 30s of in-process retry on transient errors. See issue #18.
+        _async_client = anthropic.AsyncAnthropic(max_retries=6)
     return _async_client
 
 

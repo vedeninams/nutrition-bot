@@ -385,6 +385,43 @@ This is the biggest handler. Five things happen, in order:
 | `health_update` / `workout_log` | iPhone Shortcut prefixes (`📊 health` / `🏋️ workouts`). | Parser-specific branch: parse, estimate burn via Claude, upsert `daily_stats`. |
 | `command` | Message starts with `/`. Falls through to python-telegram-bot's own routing. | n/a. |
 
+### Transient-error recovery (issue #18)
+
+Every Anthropic API call is wrapped in two layers of retry:
+
+1. **Inline (in-process) retry.** Each Anthropic client is created with
+   `max_retries=6`, so the SDK silently retries transient errors (HTTP 502 /
+   503 / 504 gateway, **HTTP 529 overload**, rate limits, connection blips)
+   with exponential backoff totalling ~30 seconds. This is enough to silently
+   absorb ~99% of real overloads — the user never knows anything happened.
+
+2. **Background retry queue** (for the rare cases where 30 seconds wasn't
+   enough). Every LLM-using branch in `handle_text` (and `handle_photo`)
+   runs its body inside `_run_with_recovery(update, original_text, work_fn)`.
+   If `work_fn` raises a transient API error after the SDK retries are
+   exhausted:
+
+   - The user gets a friendly *"Anthropic is busy, I haven't lost what you
+     sent — hang tight"* message that **echoes back their original text**
+     (so they don't have to retype it).
+   - A background task retries `work_fn` periodically (every 30 seconds, up
+     to 6 attempts → ~3 more minutes of silent recovery).
+   - When a retry succeeds, the user gets the normal reply they were
+     waiting for.
+   - If all background retries fail, the user gets a final *"I couldn't get
+     through, here's what you sent…"* message with their original text.
+
+   One pending retry per user — if the user sends a new message while a
+   retry is pending, the old retry is cancelled (latest message wins).
+
+**Permanent errors** (auth, billing, bad request, code bugs) propagate
+normally; only the four transient categories above trigger the recovery
+layer.
+
+**Limitation:** pending retries live in process memory only. A bot
+restart during an outage drops them. A persistent on-disk queue would
+survive restarts; out of scope for issue #18 — considered for later.
+
 ### The integrity guard on corrections
 
 The correction branch was a major source of bugs early on: Haiku would
@@ -845,7 +882,11 @@ return `"command"`; messages starting with the iPhone Shortcut prefixes
 Otherwise asks Haiku for one of: `log_text`, `correction`, `question`,
 `cmd_today`, `cmd_date_query`, `cmd_week`, `cmd_goal`, `cmd_lint`,
 `remember`. Cleans the LLM reply tolerantly (strips quotes, backticks,
-punctuation) and falls back to keyword heuristics on API errors.
+punctuation) and falls back to **keyword heuristics on API errors** —
+including "change", "fix", "wrong", "actually", "remove", "delete"
+(and Russian "поменя", "измени", "исправ", "удали") → `correction`;
+"how", "what", "сколько" or trailing `?` → `question`; otherwise
+`log_text`.
 
 ### 7.6 Date + goal + activity helpers
 
@@ -1209,6 +1250,35 @@ assistant turn in `conversation_messages`. Same signature, same return
 value — migration is a mechanical rename. Logging is best-effort: if
 the DB write fails the reply still goes out. `parse_mode` and other
 rendering kwargs are deliberately not stored.
+
+#### Transient-error recovery helpers (issue #18)
+
+A small layer that catches Anthropic overload / gateway / rate-limit
+errors and gracefully recovers — see §4 *Transient-error recovery* for
+the user-facing behaviour.
+
+- `_is_transient_api_error(e) → bool` — true for HTTP 502/503/504/529,
+  `RateLimitError`, `APIConnectionError`, `APITimeoutError`.
+- `_truncate_for_echo(text, limit=200)` — shorten user text for inclusion
+  in friendly retry messages.
+- `_send_overload_ack(update, original_text)` — first friendly message;
+  sent when the SDK's inline retry exhausts and we begin background
+  retry. Echoes the user's original text.
+- `_send_overload_giveup(update, original_text)` — final friendly
+  message; sent when background retries also exhaust. Includes original
+  text so the user can resend without retyping.
+- `_background_retry(user_id, update, original_text, work_fn)` — runs
+  in `asyncio.create_task`. Sleeps 30s between attempts, up to 6 attempts
+  (~3 min total). On success, exits silently (`work_fn` already sent its
+  own reply). On permanent error or attempt exhaustion, sends the
+  giveup message.
+- `_run_with_recovery(update, original_text, work_fn)` — wraps each
+  LLM-using branch in `handle_text` / `handle_photo`. Runs `work_fn`
+  inline first; if it raises a transient API error, sends the ack and
+  schedules a background retry. Permanent errors propagate.
+
+State: `_pending_retries: dict[user_id, asyncio.Task]` holds at most one
+pending retry per user. A new user message cancels the previous task.
 
 ### 11.2 Slash command handlers
 

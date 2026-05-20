@@ -18,7 +18,14 @@ from typing import Optional
 from dotenv import load_dotenv
 
 load_dotenv()   # must happen before Anthropic() reads the env
-client = anthropic.Anthropic()
+
+# max_retries=6 with the SDK's default exponential backoff (~0.5/1/2/4/8/16s)
+# covers roughly 30 seconds of in-process retry on transient errors (HTTP 529
+# overload, 503/504 gateway, connection blips, rate-limit). Per issue #18,
+# this handles ~99% of Anthropic overloads silently — the user never sees
+# anything. The friendly background-retry layer in telegram_bot.py picks up
+# the rare cases where 30s isn't enough.
+client = anthropic.Anthropic(max_retries=6)
 
 log = logging.getLogger(__name__)
 
@@ -923,7 +930,15 @@ def detect_intent(text: str, history: Optional[list[dict]] = None) -> str:
         return intent
     except Exception:
         t = text.lower()
-        if any(s in t for s in ["fix", "wrong", "actually", "remove", "delete", "исправ", "удали"]):
+        # Correction-ish verbs in English + Russian. The "change" / "поменя" /
+        # "измени" additions are from issue #18 — without them, "Change X to Y"
+        # was falling through to log_text when the intent classifier itself
+        # failed (e.g. during Anthropic overload).
+        correction_keywords = [
+            "fix", "wrong", "actually", "remove", "delete", "change",
+            "исправ", "удали", "помен", "измени",
+        ]
+        if any(s in t for s in correction_keywords):
             return "correction"
         if t.endswith("?") or any(t.startswith(s) for s in ["how", "what", "сколько"]):
             return "question"
