@@ -1492,13 +1492,34 @@ Run by cron. For every user in `withings_auth`:
    hour's fetch.
 
 CLI:
-- `python withings_sync.py` — sync all connected users.
+- `python withings_sync.py` — sync all connected users (hourly cron path).
 - `python withings_sync.py --user <id>` — sync one user.
 - `python withings_sync.py --days N` — fetch the last N days (default 2).
+- `python withings_sync.py --user <id> --since YYYY-MM-DD` — bulk
+  historical import. Internally chunks the range into 90-day windows
+  (configurable via `--chunk-days`) and stitches the responses
+  together. Withings caps a single getmeas response at roughly a few
+  hundred measurements, so the naive "request 5 years in one call"
+  truncates silently — chunked sync is the correct path for any
+  range > ~6 months. Idempotent thanks to
+  `UNIQUE(user_id, measured_at)` — safe to re-run.
 
 Errors are logged to `withings.log` (gitignored). Anything that returns
 non-zero `status` from Withings (bad token, rate limit, etc.) is logged
-and the script moves on to the next user — no user gets stuck.
+and the script moves on — for bulk imports a single failed chunk is
+recorded but doesn't abort the whole pass.
+
+Internal function map:
+- `fetch_weights_in_range(user_id, start_ts, end_ts)` — single
+  Withings API call for an arbitrary timestamp range. Returns
+  `[{measured_at, weight_kg}, …]` or `None` on failure.
+- `fetch_recent_weights(user_id, days)` — thin wrapper around the
+  above for "the last N days" (hourly cron).
+- `sync_user(user_id, days)` — fetch + insert for one user, hourly path.
+- `sync_user_range(user_id, start_ts, end_ts, chunk_days=90)` — bulk
+  historical sync, walks backwards in `chunk_days` windows from
+  `end_ts` to `start_ts`. Half-second pause between chunks.
+- `sync_all_users(days)` — iterate every user in `withings_auth`.
 
 ## 12. Cron triggers and proactive pushes
 

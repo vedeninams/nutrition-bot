@@ -210,6 +210,20 @@ python withings_sync.py --user <your_telegram_user_id>
 
 After that, the hourly cron takes over.
 
+### 5. (Optional) One-time bulk import of historical data
+
+If you've had a Withings scale for years and want all that history in the
+bot's database, use `--since YYYY-MM-DD`. The script chunks the range into
+90-day windows internally so it won't hit Withings' per-call measurement
+cap. Idempotent — re-running is safe (duplicates are silent no-ops).
+
+```bash
+python withings_sync.py --user <your_telegram_user_id> --since 2020-06-01
+```
+
+Typical run for 5 years of history takes a minute or two and logs each
+chunk to `withings.log`.
+
 ## Commands
 
 | Command | What it does |
