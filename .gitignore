@@ -15,6 +15,9 @@ ingest.log
 lint.log
 contradictions.log
 
+# Withings sync debug log — local/server only
+withings.log
+
 # Python
 __pycache__/
 *.py[cod]

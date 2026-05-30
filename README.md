@@ -163,7 +163,52 @@ Add:
 # (One day before the weekly review so the wiki is clean and any flagged
 # conflicts are surfaced to the user before Sunday's recap lands.)
 5 10 * * 6 /opt/nutrition-bot/venv/bin/python /opt/nutrition-bot/telegram_bot.py --lint-cron >> /opt/nutrition-bot/cron.log 2>&1
+
+# Withings weight sync — every hour at :07
+# Pulls new weight readings from the Withings Health API for every user
+# in the withings_auth table. No-op if no user has connected their account.
+7 * * * * cd /opt/nutrition-bot && /opt/nutrition-bot/venv/bin/python withings_sync.py >> /opt/nutrition-bot/withings.log 2>&1
 ```
+
+## Withings integration (optional — for automated weight sync)
+
+If you have a Withings smart scale, the bot can pull weight readings
+automatically from the Withings Health API. After a one-time setup, the
+hourly cron job above keeps it in sync without any further action from you.
+
+### 1. Register a Withings developer app
+
+Go to [developer.withings.com](https://developer.withings.com/) and create
+a Public API application. You'll get a **CLIENT_ID** and **CONSUMER_SECRET**.
+For the **Callback URL**, use any URL you control or `http://localhost:8765/callback`
+— it just needs to match what's in `.env`.
+
+### 2. Add the credentials to `.env`
+
+```bash
+WITHINGS_CLIENT_ID=...
+WITHINGS_CLIENT_SECRET=...
+WITHINGS_REDIRECT_URI=http://localhost:8765/callback
+```
+
+### 3. Run the one-time authorization
+
+```bash
+python setup_withings.py --user <your_telegram_user_id>
+```
+
+The script prints a URL — open it, log in to Withings, click **Allow access**.
+Your browser will be redirected to the callback URL (the page may not exist,
+that's fine). Copy the `code=...` value from the URL bar back into the
+terminal. Done — the tokens are saved.
+
+### 4. (Optional) Trigger an immediate sync
+
+```bash
+python withings_sync.py --user <your_telegram_user_id>
+```
+
+After that, the hourly cron takes over.
 
 ## Commands
 
