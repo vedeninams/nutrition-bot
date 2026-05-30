@@ -1220,6 +1220,40 @@ def get_latest_weight_reading(user_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def get_lifetime_weight_stats(user_id: int) -> Optional[dict]:
+    """Overall summary across all weight readings for this user — useful for
+    "lowest weight ever", "average over my entire history", "how long have
+    I been tracking?" type questions.
+
+    Returns None if there are no readings. Otherwise:
+        {
+            "avg_kg":   float,
+            "min_kg":   float,
+            "max_kg":   float,
+            "count":    int,
+            "first_at": ISO timestamp of the earliest reading,
+            "last_at":  ISO timestamp of the most recent reading,
+        }
+    """
+    conn = get_conn()
+    row = conn.execute(
+        """SELECT
+               AVG(weight_kg)   AS avg_kg,
+               MIN(weight_kg)   AS min_kg,
+               MAX(weight_kg)   AS max_kg,
+               COUNT(*)         AS count,
+               MIN(measured_at) AS first_at,
+               MAX(measured_at) AS last_at
+           FROM weight_readings
+           WHERE user_id = ?""",
+        (user_id,),
+    ).fetchone()
+    conn.close()
+    if not row or row["count"] == 0:
+        return None
+    return dict(row)
+
+
 def get_daily_min_weights(
     user_id: int,
     since: Optional[str] = None,

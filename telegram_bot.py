@@ -798,8 +798,8 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
         # else: user wrote about something unrelated — continue to the router.
 
-    intent = analyzer.detect_intent(text, history=history)
-    log.info(f"user={user_id} intent={intent} text={text[:60]}")
+    intent, topic = analyzer.detect_intent(text, history=history)
+    log.info(f"user={user_id} intent={intent} topic={topic} text={text[:60]}")
 
     # ── iPhone Shortcut: health snapshot (steps + weight) ────────────────────
     if intent == "health_update":
@@ -1207,7 +1207,10 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ── Question ─────────────────────────────────────────────────────────────
     if intent == "question":
         async def _work_question():
-            answer = advisor.answer_question(user_id, text, conversation=history)
+            # topic comes from detect_intent — passes through as-is to
+            # answer_question, which decides whether to load the heavy
+            # weight history into Sonnet's prompt.
+            answer = advisor.answer_question(user_id, text, conversation=history, topic=topic)
             await _send(update, _safe_reply(answer), parse_mode=ParseMode.MARKDOWN)
             # Fire-and-forget: let Haiku decide whether this question reveals
             # something about the user worth filing (usually a self-concern like
