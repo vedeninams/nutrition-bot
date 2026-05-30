@@ -1247,8 +1247,14 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def _push_to_all_users(message_fn, bot):
     """
-    Call message_fn(user_id) → text, send to every registered user.
+    Call message_fn(user_id) → text, send to every ACTIVE registered user.
     message_fn receives user_id and returns a string.
+
+    Inactive users (no meals or weight readings in the past 7 days) are
+    skipped so we don't burn Anthropic tokens summarising empty data for
+    accounts that aren't really using the bot — see issue #29. The skip
+    is automatic; if an inactive user starts logging again, the next
+    cron tick picks them back up without any flag-flipping.
     """
     from database import get_conn
     conn = get_conn()
@@ -1257,6 +1263,9 @@ async def _push_to_all_users(message_fn, bot):
 
     for row in users:
         uid = row["user_id"]
+        if not db.user_has_recent_activity(uid, days=7):
+            log.info(f"Skipping push to inactive user {uid} (no activity in 7 days)")
+            continue
         try:
             text = message_fn(uid)
             await bot.send_message(
@@ -1348,6 +1357,12 @@ async def run_lint_cron():
 
     for row in users:
         uid = row["user_id"]
+        # Skip inactive users (issue #29) — no lint pass, no contradiction
+        # detect call, no DM. Tokens saved when a registered user isn't
+        # really using the bot.
+        if not db.user_has_recent_activity(uid, days=7):
+            log.info(f"Skipping lint cron for inactive user {uid} (no activity in 7 days)")
+            continue
         try:
             # 1) Tidy first so we're detecting on a clean wiki.
             await lint.lint_user_wiki(uid)

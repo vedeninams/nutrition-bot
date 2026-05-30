@@ -1220,6 +1220,46 @@ def get_latest_weight_reading(user_id: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def user_has_recent_activity(user_id: int, days: int = 7) -> bool:
+    """True if the user has logged at least one non-deleted meal OR has any
+    weight reading in the last `days` days.
+
+    Used by the cron entry points (evening summary, weekly review, Saturday
+    lint) to skip users who aren't actively using the bot — saves Anthropic
+    tokens we'd otherwise burn summarising empty data for inactive accounts
+    (issue #29).
+
+    "Active" is a broad definition (meals OR weight) so we don't accidentally
+    skip a user who tracks weight via Withings but doesn't log food. For the
+    common case (someone who fully stops using the bot for >7 days), both
+    sources are dry and the user is correctly classified inactive.
+    """
+    cutoff = (date.today() - timedelta(days=int(days))).isoformat()
+    conn = get_conn()
+
+    meal_row = conn.execute(
+        """SELECT 1 FROM meals
+           WHERE user_id = ?
+             AND date(logged_at) >= ?
+             AND confidence != 'deleted'
+           LIMIT 1""",
+        (user_id, cutoff),
+    ).fetchone()
+    if meal_row:
+        conn.close()
+        return True
+
+    weight_row = conn.execute(
+        """SELECT 1 FROM weight_readings
+           WHERE user_id = ?
+             AND date(measured_at) >= ?
+           LIMIT 1""",
+        (user_id, cutoff),
+    ).fetchone()
+    conn.close()
+    return weight_row is not None
+
+
 def get_lifetime_weight_stats(user_id: int) -> Optional[dict]:
     """Overall summary across all weight readings for this user — useful for
     "lowest weight ever", "average over my entire history", "how long have

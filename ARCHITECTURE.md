@@ -655,6 +655,15 @@ Workouts JSON is parsed back into a list automatically.
 `get_latest_weight` returns the most recently recorded weight for
 activity-calorie estimation.
 
+#### `user_has_recent_activity(user_id, days=7) → bool`
+True if the user has logged a meal (excluding soft-deleted) OR has any
+`weight_readings` row in the last `days` days. Used by the cron pushes
+(issue #29) to skip silent users — no Anthropic call, no Telegram push
+for someone who hasn't engaged in a week. Re-activates automatically
+the next cron tick after the user logs again. The OR makes it possible
+for a user who only ever weighs in (no meal logging) to still receive
+their weekly review.
+
 ### 5.9 Short-term conversation memory
 
 #### `log_message(user_id, role, content)`
@@ -1037,10 +1046,19 @@ readings. Returns a dict with `current_kg` (today's morning-low if
 available), `yesterday_kg`, `week_ago_kg`, `month_ago_kg`, their signed
 deltas, `target_kg` (from `goals.md`), `delta_target`,
 `pace_kg_per_wk` (linear end-to-end trend over the window, only if ≥14
-days of data), and `history` (the raw per-date min series).
+days of data), `this_week_avg_kg` (mean of daily-min readings over the
+last 7 days), `last_week_avg_kg` (mean over the preceding 7 days),
+`delta_week_avg` (`this_week_avg_kg - last_week_avg_kg`), and `history`
+(the raw per-date min series).
 
 The "look up the weight at N days ago" uses a ±2-day search window so
 we don't return None just because the user skipped a weighing.
+
+The smoothed `this_week_avg_kg` / `last_week_avg_kg` pair (issue #29)
+is preferred over the point-to-point `week_ago_kg → current_kg`
+comparison in the weekly review, because single-day readings are noisy
+(day-to-day swings of ±0.3–0.5 kg are normal even on a flat trend).
+Averaging both endpoints over 7 days gives a much steadier signal.
 
 #### `_fmt_arrow_delta(delta, unit="kg") → str`
 
@@ -1054,9 +1072,12 @@ string if there's no data.
 
 - `mode="evening"` — compact: current weight, day + week deltas on one
   line, target distance.
-- `mode="weekly"` — richer: week start→current, month delta, target
-  distance, and a "pace per month + weeks-to-target" projection when
-  the trend is heading toward the target.
+- `mode="weekly"` — richer: smoothed week comparison (this-week avg vs
+  last-week avg — issue #29), month delta, target distance, and a
+  "pace per month + weeks-to-target" projection when the trend is
+  heading toward the target. Falls back to the point-to-point
+  `week_ago_kg → current_kg` line if the user has too few readings for
+  a full 7-day average on either side.
 
 #### `_fmt_weight_context_for_prompt(user_id, include_history=False) → str`
 
@@ -1493,17 +1514,24 @@ pending retry per user. A new user message cancels the previous task.
 
 - `_push_to_all_users(message_fn, bot)` — iterate over every `users`
   row, call `message_fn(user_id) → text`, send via Telegram. Silent on
-  per-user failures.
+  per-user failures. **Skips inactive users** (issue #29): before
+  calling `message_fn`, checks `db.user_has_recent_activity(uid, days=7)`.
+  Users who haven't logged a meal OR recorded a weight reading in the
+  past 7 days are skipped — no Anthropic call, no Telegram push.
+  Re-activates automatically the next cron tick after they resume
+  logging.
 - `run_daily_summary`, `run_evening_summary`, `run_weekly_review` —
   wrappers over `_push_to_all_users` that select the appropriate
-  advisor function.
+  advisor function. Inherit the inactive-user skip from the helper.
 - `_format_contradiction_dm(c) → str` — friendly DM body for an OPEN
   contradiction. Uses Haiku's `ask` field; falls back to plain rendering
   for legacy sections.
 - `run_lint_cron()` — Saturday 10:05 Berlin job. For every user: lint
   the wiki, detect new contradictions, record new ones, DM the oldest
   open. After the per-user loop, runs
-  `db.purge_conversation_older_than(14)` once globally.
+  `db.purge_conversation_older_than(14)` once globally. Applies the
+  same `user_has_recent_activity(uid, days=7)` skip directly (this
+  function iterates users itself rather than via `_push_to_all_users`).
 
 ### 11.5 `main()`
 
