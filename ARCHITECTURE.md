@@ -998,6 +998,61 @@ by the analyzer.
 map and a renderer for the activity block (weight + steps + per-workout
 lines + total burn).
 
+### 8.3A Weight tracking (issue #7 surfacing)
+
+Reads from the `weight_readings` table populated by `withings_sync.py`
+and the target weight in `goals.md`. All helpers gracefully return
+empty/None on a fresh user with no readings — they're safe to call
+unconditionally.
+
+#### `_weight_context(user_id) → dict`
+
+Computes the user's weight situation from the last ~35 days of
+readings. Returns a dict with `current_kg` (today's morning-low if
+available), `yesterday_kg`, `week_ago_kg`, `month_ago_kg`, their signed
+deltas, `target_kg` (from `goals.md`), `delta_target`,
+`pace_kg_per_wk` (linear end-to-end trend over the window, only if ≥14
+days of data), and `history` (the raw per-date min series).
+
+The "look up the weight at N days ago" uses a ±2-day search window so
+we don't return None just because the user skipped a weighing.
+
+#### `_fmt_arrow_delta(delta, unit="kg") → str`
+
+Renders a signed number with an arrow: `↓ 0.2 kg`, `↑ 0.3 kg`, or
+`steady` for `|delta| < 0.05`.
+
+#### `_fmt_weight_block(user_id, mode="evening"|"weekly") → str`
+
+Renders a formatted weight block for inclusion in summaries. Empty
+string if there's no data.
+
+- `mode="evening"` — compact: current weight, day + week deltas on one
+  line, target distance.
+- `mode="weekly"` — richer: week start→current, month delta, target
+  distance, and a "pace per month + weeks-to-target" projection when
+  the trend is heading toward the target.
+
+#### `_fmt_weight_context_for_prompt(user_id) → str`
+
+Compact text describing the weight situation, suitable for injection
+into a Sonnet system prompt (`answer_question`, `evening_summary`,
+`weekly_review`). Empty string if no data.
+
+#### Surfacing — where each helper is used
+
+- **Evening summary**: `_fmt_weight_block(mode="evening")` is inserted
+  between the totals block and the AI analysis paragraph. The prompt
+  also gets the `_fmt_weight_context_for_prompt` string so the analysis
+  can reference weight when relevant.
+- **Weekly review**: `_fmt_weight_block(mode="weekly")` joins the stats
+  header (after on-track count, past-month avg). The prompt gets the
+  context string so the review's three paragraphs can weave in trend +
+  target progress.
+- **`answer_question`**: the context string is added to the system
+  prompt so Sonnet can answer "how's my weight progress?" type
+  questions concretely.
+
 ### 8.4 Day-level summaries
 
 #### `day_summary(user_id, for_date, label, *, include_totals=True) → str`
@@ -1173,9 +1228,20 @@ and our write. Each page goes through: empty-check, `_lint_page` call,
 sanity check, backup, `write_page`. Results dict is
 `{page: {before, after, rewritten}}` or `{page: {skipped: 'empty'}}`.
 
-After all pages, runs `wiki.consolidate_goal_line` as a deterministic
-safety pass on `goals.md` (collapsing any calorie-goal drift Haiku
-didn't catch).
+After all pages, runs three deterministic post-passes (all wrapped in
+try/except — none can break the lint):
+
+1. `wiki.consolidate_goal_line` — collapses any calorie-goal drift on
+   `goals.md` into the single canonical bullet.
+2. `wiki.consolidate_target_weight_line` — same idea for the target
+   weight line (issue #7).
+3. `_append_weight_observations` (issue #7) — detects clear
+   trends / plateaus / milestones in the user's weight history from
+   `weight_readings` and appends new (non-duplicate) dated bullets to
+   `patterns.md`. Templates only — no LLM call. Thresholds tuned
+   conservatively: trend ≥ 0.2 kg/week for ≥ 3 weeks; plateau =
+   max-min < 0.4 kg over 14 days; milestone = crossed an integer-kg
+   boundary in the past 7 days.
 
 **Called from:** `cmd_lint`, `run_lint_cron`, `_run_post_change_lint`.
 
@@ -1462,10 +1528,11 @@ a schedule:
 
 | User-visible | Internal-only |
 | --- | --- |
-| Evening summary (21:00 daily) | Post-ingest lint runs |
-| Sunday weekly review (Sun 09:00) | Conversation-message purge runs |
+| Evening summary (21:00 daily) — includes weight + target progress block when readings exist | Post-ingest lint runs |
+| Sunday weekly review (Sun 09:00) — weight trend + target progress + pace projection | Conversation-message purge runs |
 | Saturday contradiction DM (Sat 10:05, only when something is open) | Lint backups under `.backups/` |
-| 80%/100% goal alert (in-line with the meal-log reply) | `ingest.log`, `lint.log`, `contradictions.log` breadcrumbs |
+| 80%/100% goal alert (in-line with the meal-log reply) | `ingest.log`, `lint.log`, `contradictions.log`, `withings.log` breadcrumbs |
+| Hourly Withings weight sync (silent — readings just appear in summaries) | Weight-pattern observations get appended to `patterns.md` on Saturday lint |
 
 ---
 

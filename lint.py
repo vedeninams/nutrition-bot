@@ -338,6 +338,184 @@ def _append_log(user_id: int, per_page: dict[str, dict]) -> None:
 # Main entry
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Proactive weight-pattern observations (issue #7 surfacing)
+#
+# Each Saturday lint pass also checks the user's weight history and, if a
+# clear trend / plateau / milestone is present, appends a dated observation
+# to patterns.md. The bot's existing patterns.md format expects bullet lines
+# stamped with [YYYY-MM-DD], so these entries plug in cleanly.
+#
+# Deterministic templates — we don't use an LLM here. The observations are
+# short, factual, and dated. The LLM-driven summaries (evening, weekly,
+# Q&A) then surface these as part of the wiki context.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# A pattern is "interesting enough to add to the wiki" when:
+#   - sustained trend ≥ 0.2 kg/week (absolute) over ≥ 3 weeks → "trending down/up"
+#   - plateau: max-min over the past 14 days < 0.4 kg                 → "steady"
+#   - milestone: crossed below/above an integer kg in the past 7 days → "crossed"
+#
+# All thresholds tuned to be conservative — we'd rather miss a borderline
+# trend than spam patterns.md with noise.
+
+_WEIGHT_TREND_KG_PER_WEEK_THRESHOLD = 0.2
+_WEIGHT_TREND_MIN_WEEKS = 3
+_WEIGHT_PLATEAU_WINDOW_DAYS = 14
+_WEIGHT_PLATEAU_BAND_KG = 0.4
+_WEIGHT_MILESTONE_WINDOW_DAYS = 7
+
+
+def _detect_weight_observations(user_id: int) -> list[str]:
+    """Return a list of single-sentence observations about this user's weight
+    over the last ~30 days. Empty list if nothing notable. Each string is
+    ready to be wrapped in a `- [YYYY-MM-DD] ...` bullet.
+
+    Imported lazily to keep the lint module's top-level imports independent
+    of database (lint pages are about wiki content, not DB schemas).
+    """
+    import database as db
+    from datetime import date, timedelta
+
+    today = date.today()
+    since = (today - timedelta(days=35)).isoformat()
+    history = db.get_daily_min_weights(user_id, since=since)
+    if len(history) < 7:
+        return []   # not enough data to say anything meaningful
+
+    observations: list[str] = []
+    values = [(date.fromisoformat(r["date"]), r["weight_kg"]) for r in history]
+
+    # ── Sustained trend ──────────────────────────────────────────────────────
+    # Fit a simple end-to-end average and report if ≥ threshold for ≥ 3 weeks.
+    first_d, first_w = values[0]
+    last_d, last_w = values[-1]
+    span_days = max(1, (last_d - first_d).days)
+    if span_days >= _WEIGHT_TREND_MIN_WEEKS * 7:
+        kg_per_wk = (last_w - first_w) / span_days * 7
+        if abs(kg_per_wk) >= _WEIGHT_TREND_KG_PER_WEEK_THRESHOLD:
+            direction = "down" if kg_per_wk < 0 else "up"
+            observations.append(
+                f"Weight trending {direction} ~{abs(kg_per_wk):.2f} kg/week "
+                f"over the past {span_days // 7} weeks"
+            )
+
+    # ── Plateau ──────────────────────────────────────────────────────────────
+    plateau_window = [
+        (d, w) for d, w in values
+        if (today - d).days <= _WEIGHT_PLATEAU_WINDOW_DAYS
+    ]
+    if len(plateau_window) >= 5:
+        weights_window = [w for _, w in plateau_window]
+        band = max(weights_window) - min(weights_window)
+        if band < _WEIGHT_PLATEAU_BAND_KG:
+            avg = sum(weights_window) / len(weights_window)
+            observations.append(
+                f"Weight steady around {avg:.1f} kg (within ±{band/2:.1f} kg "
+                f"for {len(plateau_window)} days)"
+            )
+
+    # ── Milestone: crossed an integer kg recently ────────────────────────────
+    # If today's weight is below floor(prior weight) — i.e. crossed below
+    # the next-lower integer — in the past 7 days, flag it.
+    import math
+    recent = [(d, w) for d, w in values if (today - d).days <= _WEIGHT_MILESTONE_WINDOW_DAYS]
+    older  = [(d, w) for d, w in values if (today - d).days >  _WEIGHT_MILESTONE_WINDOW_DAYS]
+    if recent and older:
+        cur = recent[-1][1]
+        prior = older[-1][1]
+        cur_floor = math.floor(cur)
+        prior_floor = math.floor(prior)
+        if cur_floor < prior_floor:
+            observations.append(
+                f"Crossed below {prior_floor} kg (now {cur:.1f} kg)"
+            )
+        elif cur_floor > prior_floor:
+            observations.append(
+                f"Crossed above {prior_floor + 1} kg (now {cur:.1f} kg)"
+            )
+
+    return observations
+
+
+def _existing_weight_observations(content: str) -> set[str]:
+    """Pull the gist of any existing weight bullets out of patterns.md so we
+    don't append a near-duplicate this week.
+
+    Match heuristic: anything containing the word 'weight' OR 'kg' inside a
+    bullet line. We compare on the lowercase-stripped string to avoid
+    re-stamping a week-old observation that's still true.
+    """
+    out: set[str] = set()
+    for line in content.splitlines():
+        s = line.strip()
+        if not s.startswith(("- ", "* ", "• ")):
+            continue
+        low = s.lower()
+        if "weight" in low or " kg" in low:
+            # Strip bullet marker + date prefix for similarity match
+            body = re.sub(r"^[\s\-\*•]+", "", s).strip()
+            body = re.sub(r"^\[\d{4}-\d{2}-\d{2}\]\s*", "", body).strip()
+            out.add(body.lower())
+    return out
+
+
+def _append_weight_observations(user_id: int) -> int:
+    """Detect any notable weight patterns and append new (non-duplicate) ones
+    to patterns.md as dated bullets. Returns the number of new bullets added.
+    Caller holds `wiki.get_lock(user_id)`.
+    """
+    new_obs = _detect_weight_observations(user_id)
+    if not new_obs:
+        return 0
+
+    existing = wiki.read_page(user_id, "patterns") or ""
+    existing_low = _existing_weight_observations(existing)
+    date_str = datetime.now().strftime("%Y-%m-%d")
+
+    appended: list[str] = []
+    for obs in new_obs:
+        # Skip if a similar observation is already in patterns.md.
+        if any(_observations_match(obs, e) for e in existing_low):
+            continue
+        appended.append(f"- [{date_str}] {obs}")
+
+    if not appended:
+        return 0
+
+    # Strip the empty-placeholder line if it's still there (self-healing).
+    cleaned = wiki.strip_empty_placeholder(existing).rstrip()
+    new_content = cleaned + "\n" + "\n".join(appended) + "\n"
+    wiki.write_page(user_id, "patterns", new_content)
+
+    # Leave a breadcrumb in log.md for each new observation, matching the
+    # existing append-to-page audit convention.
+    for line in appended:
+        wiki.append_log(
+            user_id,
+            "Added to patterns.md (weight observation)",
+            line,
+        )
+
+    _log.info(
+        f"user={user_id} appended {len(appended)} weight observation(s)"
+    )
+    return len(appended)
+
+
+def _observations_match(a: str, b: str) -> bool:
+    """Loose similarity check between two weight observations — same notion
+    (trending up vs trending down vs steady vs crossed) → match.
+    Prevents stamping "Weight trending down 0.3 kg/week" when patterns.md
+    already has "Weight trending down 0.25 kg/week" from last week.
+    """
+    al, bl = a.lower(), b.lower()
+    for keyword in ("trending down", "trending up", "steady", "crossed below", "crossed above"):
+        if keyword in al and keyword in bl:
+            return True
+    return False
+
+
 async def lint_user_wiki(user_id: int) -> dict:
     """
     Run a lint pass over every lintable page for this user.
@@ -430,6 +608,37 @@ async def lint_user_wiki(user_id: int) -> dict:
         except Exception as e:
             # Consolidation must never break a lint pass; log and move on.
             _log.warning(f"user={user_id} consolidate_goal_line failed: {e}")
+
+        # Same belt-and-braces pass for the target-weight canonical line.
+        try:
+            consol_tw = wiki.consolidate_target_weight_line(user_id)
+            if consol_tw.get("rewrote"):
+                _log.info(
+                    f"user={user_id} consolidated target weight line: "
+                    f"found={consol_tw['found']} kept={consol_tw['kept']}"
+                )
+        except Exception as e:
+            _log.warning(f"user={user_id} consolidate_target_weight_line failed: {e}")
+
+        # Proactive weight-pattern observations (issue #7). Detects clear
+        # trends / plateaus / milestones from weight_readings and appends
+        # dated bullets to patterns.md when something new is worth noting.
+        # Errors are swallowed so a missing weight feature can't break lint.
+        try:
+            n_added = _append_weight_observations(user_id)
+            if n_added:
+                # Fold into the patterns result so the lint summary shows it.
+                patterns_info = result.get("patterns", {})
+                after_lines = _line_count(wiki.read_page(user_id, "patterns"))
+                patterns_info["after"] = after_lines
+                patterns_info["rewritten"] = True
+                patterns_info["weight_observations_added"] = n_added
+                # If patterns was previously skipped (empty), it isn't empty now.
+                patterns_info.pop("skipped", None)
+                patterns_info.setdefault("before", after_lines - n_added)
+                result["patterns"] = patterns_info
+        except Exception as e:
+            _log.warning(f"user={user_id} weight observations failed: {e}")
 
         # After all pages done, append the summary to log.md (still holding
         # the lock, so we're safe from concurrent writes).
