@@ -782,7 +782,7 @@ Intents:
   correction    — fixing, adjusting, or deleting a just-logged entry (quantity, count, name, meal type, or removal). See context rule above.
   question      — asking for advice, information, analysis, a recipe, or cooking instructions (e.g. "how much protein today?", "what should my calorie goal be?", "is my diet balanced?", "what should I eat for dinner?", "give me a recipe for X", "how do I cook X?"). Also any follow-up to bot-offered suggestions/options — see context rule above.
   cmd_today     — wants to see TODAY's food log summary (e.g. "show today", "what did I eat today", "today's summary")
-  cmd_date_query — wants to see food log for a SPECIFIC past day (e.g. "what did I eat yesterday", "show yesterday", "what did I eat on Tuesday", "my food last Monday", "show me Wednesday", "what was my food on April 7th")
+  cmd_date_query — wants to see FOOD LOG for a specific past day (e.g. "what did I eat yesterday", "show yesterday", "what did I eat on Tuesday", "my food last Monday", "show me Wednesday", "what was my food on April 7th"). ONLY for food/meal queries about a past day — NOT for weight, body metrics, or any other stat. Weight questions about a past day are always `question`, see below.
   cmd_week      — wants the FULL weekly review/summary covering everything (e.g. "weekly review", "how was my week overall", "give me my Sunday review", "show me this week"). NOT when the user asks about a specific nutrient, meal, or aspect — those are questions, even when they mention "this week".
   cmd_goal      — wants to CHANGE or SET their calorie goal to a specific number (e.g. "set my goal to 1800", "change my goal to 2200 calories") — NOT asking what it should be
   cmd_lint      — wants the bot to tidy up / clean up / dedupe / review its own notes or memory about the user (e.g. "lint", "tidy up", "tidy up your notes", "clean up your notes", "dedup my notes", "dedupe", "clean up my profile", "sort out your memory", "review your notes about me", "check your notes for contradictions"). This is about the bot's own housekeeping of what it remembers — NOT about the user's food log or daily summary.
@@ -797,8 +797,21 @@ IMPORTANT:
 - "set my goal to 1800" → cmd_goal (only when setting a specific number)
 - "I don't eat fish", "please remember I hate cilantro", "I'm lactose intolerant" → remember
 - "wait, actually this was breakfast" AFTER a just-logged meal → correction (meal-type change)
-- ANY mention of a specific past day when asking about food/eating → cmd_date_query (NOT cmd_today)
-  Examples: "yesterday", "Tuesday", "last Monday", "April 7th" → cmd_date_query
+- A specific past day mentioned together WITH a food/meal query → cmd_date_query (NOT cmd_today). The query MUST be about food/eating; a past day alone isn't enough.
+  Examples (all about food on that day): "what did I eat yesterday", "show me Tuesday's meals", "my food last Monday", "what was my food on April 7th" → cmd_date_query
+- Weight, body metrics, weight goals, weight trends, weight averages — ALWAYS `question`, even when a specific day, month, or week is mentioned. The bot has full weight history and Sonnet can answer trend / split / average questions concretely. Examples (ALL → question):
+    "what's my weight?" → question
+    "what was my weight in April" → question
+    "tell me my weight in April" → question
+    "how's my weight trend?" → question
+    "what's my average weight this month?" → question
+    "what's my average weight split by months?" → question
+    "how much have I lost this month?" → question
+    "what was my weight yesterday?" → question
+    "am I on track for my target weight?" → question
+    "how's my weight progress?" → question
+    "what was my lowest weight last year?" → question
+  cmd_date_query is ONLY for "what did I eat on day X" style queries about FOOD.
 - Specific-topic questions that happen to mention "this week" are STILL questions, not cmd_week:
     "how's my protein this week?" → question
     "am I hitting my calorie goal this week?" → question
@@ -819,7 +832,42 @@ IMPORTANT:
     "how's my diet looking?" → question
     "audit my food this week" → question
 
-Reply with ONLY the intent word, nothing else. No explanation, no punctuation."""
+OUTPUT FORMAT — intent word, optionally with a topic tag:
+
+By default reply with just the single intent word (correction, log_text,
+cmd_today, cmd_date_query, cmd_week, cmd_goal, cmd_lint, remember, or
+question). No explanation, no punctuation.
+
+For `question` intent ONLY, you MAY optionally append `:weight` when the
+question is about weight, body composition, body progress, fitness
+changes, scale data, or related body metrics — even when the user uses
+synonyms or oblique phrasings. This is a semantic check, not keyword
+matching: a question about "body progress" or "how I'm changing
+physically" is `question:weight` even without the word "weight".
+
+Examples — `question:weight`:
+  "what's my weight?" → question:weight
+  "tell me my weight in April" → question:weight
+  "what's my weight trend?" → question:weight
+  "what's my average weight split by months?" → question:weight
+  "how much have I lost this month?" → question:weight
+  "show me my body progress" → question:weight
+  "how am I changing physically?" → question:weight
+  "am I getting leaner?" → question:weight
+  "am I on track for my target weight?" → question:weight
+  "what was my lowest weight last year?" → question:weight
+  "what's my BMI trend?" → question:weight
+
+Examples — plain `question` (no topic suffix):
+  "how much protein did I eat today?" → question
+  "what should I have for dinner?" → question
+  "give me a recipe for chicken" → question
+  "is my diet balanced?" → question
+  "how many calories in an avocado?" → question
+
+ALL OTHER intents (correction, log_text, cmd_today, cmd_date_query,
+cmd_week, cmd_goal, cmd_lint, remember) NEVER get a topic suffix —
+just the intent word."""
 
 
 # Prefix tokens used by the iPhone Shortcuts — detected before calling intent API
@@ -854,10 +902,30 @@ def _format_transcript(history: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
-def detect_intent(text: str, history: Optional[list[dict]] = None) -> str:
+def detect_intent(
+    text: str,
+    history: Optional[list[dict]] = None,
+) -> tuple[str, Optional[str]]:
     """
-    Classify the user's latest message into a router intent. Uses Haiku
-    so it works in any language. Falls back to 'log_text' on API errors.
+    Classify the user's latest message into a router intent + optional
+    topic tag. Uses Haiku so it works in any language. Falls back to
+    ('log_text', None) on API errors.
+
+    Returns a tuple `(intent, topic)`:
+      - intent: one of `log_text` / `correction` / `question` / `cmd_today` /
+        `cmd_date_query` / `cmd_week` / `cmd_goal` / `cmd_lint` / `remember`
+        / `command` / `health_update` / `workout_log`.
+      - topic: only meaningful when `intent == "question"`. Currently the
+        only recognised topic is `"weight"` (for any question about weight,
+        body composition, body progress, fitness changes, scale data —
+        semantic match, not keyword). `None` otherwise.
+
+    Topic-tag mechanism (issue #24): we ask Haiku — which already runs for
+    every text message — to optionally append `:weight` to the intent word
+    when it judges the question is weight-related. This gives semantic
+    classification without an extra API call or added latency. The change
+    is backward-compatible at the prompt level: Haiku may still output just
+    the intent word for any non-weight question.
 
     The short-term conversation `history` (list of {role, content} dicts,
     oldest first, ending with the current user turn) is rendered as a
@@ -868,14 +936,14 @@ def detect_intent(text: str, history: Optional[list[dict]] = None) -> str:
     the router firmly in classifier mode.
     """
     if text.strip().startswith("/"):
-        return "command"
+        return "command", None
 
     # iPhone Shortcuts send structured messages with these prefixes
     stripped = text.strip()
     if stripped.startswith(HEALTH_PREFIX):
-        return "health_update"
+        return "health_update", None
     if stripped.startswith(WORKOUT_PREFIX):
-        return "workout_log"
+        return "workout_log", None
 
     # Build ONE user message containing (a) the transcript so far, and
     # (b) the latest message to classify. The transcript excludes the
@@ -890,44 +958,64 @@ def detect_intent(text: str, history: Optional[list[dict]] = None) -> str:
             f"{transcript}\n"
             "---\n\n"
             f"Latest user message to classify:\n{text}\n\n"
-            "Reply with ONLY the intent word."
+            "Reply with the intent word (optionally `:weight` for question intents)."
         )
     else:
         user_prompt = (
             f"Latest user message to classify:\n{text}\n\n"
-            "Reply with ONLY the intent word."
+            "Reply with the intent word (optionally `:weight` for question intents)."
         )
 
     messages = [{"role": "user", "content": user_prompt}]
     history_len = len(history) if history else 0
 
+    valid = {"log_text", "correction", "question", "cmd_today",
+             "cmd_date_query", "cmd_week", "cmd_goal", "cmd_lint",
+             "remember"}
+
     try:
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=10,
+            max_tokens=12,   # was 10 — bumped to fit "question:weight" (15 chars / 4 tokens)
             system=INTENT_SYSTEM_PROMPT,
             messages=messages,
         )
         raw = response.content[0].text
-        # Be tolerant of stray decoration around the single-word answer:
-        # quotes, backticks, bold markers, trailing punctuation, etc.
-        # Before: a bare "question." was silently coerced to log_text.
-        cleaned = raw.strip().lower().strip("`\"'*_ .!?,:;")
-        valid = {"log_text", "correction", "question", "cmd_today",
-                 "cmd_date_query", "cmd_week", "cmd_goal", "cmd_lint",
-                 "remember"}
-        if cleaned in valid:
-            intent = cleaned
+        # Be tolerant of stray decoration around the answer: quotes,
+        # backticks, bold markers, trailing punctuation. Preserve `:` so
+        # the optional topic suffix survives.
+        cleaned = raw.strip().lower().strip("`\"'*_ .!?,;")
+
+        # Split on the first `:` to separate intent from optional topic.
+        if ":" in cleaned:
+            intent_part, _, topic_part = cleaned.partition(":")
+            intent_part = intent_part.strip()
+            topic_part = topic_part.strip()
+        else:
+            intent_part = cleaned
+            topic_part = ""
+
+        if intent_part in valid:
+            intent = intent_part
         else:
             # Last resort: pick the first valid token that appears as a
             # whole word in the reply. Handles "intent: question" style.
             words = re.findall(r"[a-z_]+", cleaned)
             intent = next((w for w in words if w in valid), "log_text")
+
+        # Only `question:weight` is recognised. Any other topic suffix is
+        # silently ignored — we'd rather miss a topic than misroute on
+        # garbage. Defensive against Haiku outputting "question:other" /
+        # "question:food" etc., which we don't (yet) act on.
+        topic: Optional[str] = None
+        if intent == "question" and topic_part == "weight":
+            topic = "weight"
+
         log.info(
             f"detect_intent history_len={history_len} "
-            f"last_user={text[:80]!r} raw={raw!r} intent={intent}"
+            f"last_user={text[:80]!r} raw={raw!r} intent={intent} topic={topic}"
         )
-        return intent
+        return intent, topic
     except Exception:
         t = text.lower()
         # Correction-ish verbs in English + Russian. The "change" / "поменя" /
@@ -939,10 +1027,12 @@ def detect_intent(text: str, history: Optional[list[dict]] = None) -> str:
             "исправ", "удали", "помен", "измени",
         ]
         if any(s in t for s in correction_keywords):
-            return "correction"
+            return "correction", None
         if t.endswith("?") or any(t.startswith(s) for s in ["how", "what", "сколько"]):
-            return "question"
-        return "log_text"
+            # No semantic topic detection in the fallback path — when the
+            # API is down anyway the snapshot-only weight context is fine.
+            return "question", None
+        return "log_text", None
 
 
 def extract_query_date(text: str, today_str: str) -> tuple[str, str]:

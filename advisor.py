@@ -519,7 +519,9 @@ def weekly_review(user_id: int) -> str:
     )
 
     profile = wiki.read_wiki_for_prompt(user_id)
-    weight_context_for_prompt = _fmt_weight_context_for_prompt(user_id)
+    # Weekly review's whole point is trend analysis — always send the full
+    # daily history so Sonnet can talk concretely about the week + longer arc.
+    weight_context_for_prompt = _fmt_weight_context_for_prompt(user_id, include_history=True)
 
     prompt = f"""You are a supportive personal nutritionist sending a detailed Sunday weekly review to your client.
 
@@ -555,7 +557,12 @@ Reply in the same language the user typically uses."""
 # 4. Answer user nutrition questions
 # ─────────────────────────────────────────────────────────────────────────────
 
-def answer_question(user_id: int, question: str, conversation: list[dict] | None = None) -> str:
+def answer_question(
+    user_id: int,
+    question: str,
+    conversation: list[dict] | None = None,
+    topic: Optional[str] = None,
+) -> str:
     """
     Answer any nutrition question -data queries AND general advice.
     Acts as a knowledgeable personal nutritionist, not just a data lookup.
@@ -564,6 +571,11 @@ def answer_question(user_id: int, question: str, conversation: list[dict] | None
     dicts, oldest first, ending with the current user question). When
     supplied it's passed as the messages list so follow-ups ("and what
     about if I add cardio?") retain context from earlier turns.
+
+    topic: optional classification tag from `analyzer.detect_intent`.
+    Currently the only recognised topic is `"weight"`, which triggers the
+    heavy daily-history weight context (issue #24). Anything else (or
+    None) gets the lightweight snapshot only.
     """
     user = db.get_user(user_id) or {}
     goal = wiki.get_daily_kcal(user_id, 2000)
@@ -571,7 +583,15 @@ def answer_question(user_id: int, question: str, conversation: list[dict] | None
     week = db.get_week_totals(user_id)
 
     profile = wiki.read_wiki_for_prompt(user_id)
-    weight_context_for_prompt = _fmt_weight_context_for_prompt(user_id)
+    # Two-tier weight context (issue #24): always send the cheap snapshot,
+    # only send the token-heavy daily history when the intent router (Haiku)
+    # tagged this question as `:weight`. Saves ~$3-5/month vs unconditional
+    # injection while still being semantic — Haiku catches synonyms and
+    # oblique phrasings ("how am I changing", "body progress", etc.)
+    # without us maintaining a keyword list.
+    weight_context_for_prompt = _fmt_weight_context_for_prompt(
+        user_id, include_history=(topic == "weight")
+    )
     context = f"""You are a friendly, knowledgeable personal nutritionist.
 You have access to the user's food tracking data below. Use it when relevant.
 
@@ -934,12 +954,27 @@ def _fmt_weight_block(user_id: int, mode: str = "evening") -> str:
     return "\n".join(lines)
 
 
-def _fmt_weight_context_for_prompt(user_id: int) -> str:
+def _fmt_weight_context_for_prompt(
+    user_id: int,
+    include_history: bool = False,
+) -> str:
     """Compact text block describing the user's current weight situation,
-    suitable for injection into an LLM system prompt (answer_question,
-    evening_summary's analysis paragraph, weekly_review).
+    suitable for injection into an LLM system prompt (`answer_question`,
+    `evening_summary`, `weekly_review`).
 
-    Returns empty string if there's no weight data.
+    Two-tier context (issue #24):
+      - **Always included** (when there's any data at all): the snapshot
+        line (current + day/week/month deltas + target distance) plus a
+        one-line lifetime summary. Small, ~200 tokens, negligible cost.
+      - **Optional via `include_history=True`**: the full daily-min series
+        (one row per day, ~17 chars each). Lets Sonnet compute any
+        statistical aggregation the user asks for — weekly average,
+        monthly median, year-over-year, arbitrary windows — instead of
+        us pre-baking specific aggregations. Roughly 8 k extra tokens
+        for 5 years of data, so reserved for cases where it's likely
+        to be used (weight-specific questions, weekly review).
+
+    Returns empty string if there's no weight data at all.
     """
     ctx = _weight_context(user_id)
     cur = ctx["current_kg"]
@@ -967,7 +1002,49 @@ def _fmt_weight_context_for_prompt(user_id: int) -> str:
         else:
             parts.append(f"target {ctx['target_kg']:.0f} kg")
 
-    return "Weight context — " + "; ".join(parts) + "."
+    sections = ["Weight context — " + "; ".join(parts) + "."]
+
+    # ── Lifetime summary (one tiny line) ────────────────────────────────────
+    # Cheap, accurate anchor for "lowest ever", "how long have I been
+    # tracking", overall span. Sonnet uses this when it just needs a global
+    # number rather than computing across the full series below.
+    lt = db.get_lifetime_weight_stats(user_id)
+    if lt:
+        first_d = lt["first_at"][:10] if lt.get("first_at") else "?"
+        last_d  = lt["last_at"][:10]  if lt.get("last_at")  else "?"
+        sections.append(
+            f"Lifetime span: {first_d} → {last_d} "
+            f"({lt['count']} readings, lifetime min {lt['min_kg']:.1f} kg, "
+            f"lifetime max {lt['max_kg']:.1f} kg)."
+        )
+
+    # ── Raw daily-min series — opt-in (token-heavy) ─────────────────────────
+    # Sent only when `include_history=True` because it's ~8 k tokens for 5
+    # years of data. Callers gate on whether the model is likely to need it:
+    #   - weekly_review: always True (trend analysis is the point)
+    #   - answer_question: True iff _is_weight_question(text) matches
+    #   - evening_summary: False (analysis is meal-focused; snapshot is enough)
+    #
+    # daily_min is the morning-low for each day = the conventional "true"
+    # weight. Sonnet computes whatever aggregation the user asks for —
+    # weekly average, monthly median, yearly mean, year-over-year, rolling
+    # trend, arbitrary windows — instead of us pre-baking per-question
+    # handlers (issue #24).
+    if include_history:
+        daily = db.get_daily_min_weights(user_id)   # all history, oldest first
+        if daily:
+            lines = [
+                "Daily weight history (oldest first; each row is that day's "
+                "morning-low = the canonical 'true' weight for that date). "
+                "Use this series to compute any statistic the user asks for — "
+                "weekly average, monthly median, yearly mean, year-over-year, "
+                "rolling trend, whatever:"
+            ]
+            for d in daily:
+                lines.append(f"  {d['date']}  {d['weight_kg']:.1f}")
+            sections.append("\n".join(lines))
+
+    return "\n\n".join(sections)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

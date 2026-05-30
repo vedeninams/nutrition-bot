@@ -414,7 +414,7 @@ This is the biggest handler. Five things happen, in order:
 | `correction` | After the bot just logged a meal and the user is fixing it (*"actually three eggs"*, *"that was lunch"*, *"remove the hummus"*). | Fetch today's full meal log + last logged batch, run `analyzer.resolve_correction`, integrity-guard the meal_ids, apply each action (`update` / `delete` / `scale_dish_grams` / `scale_dish` / `delete_many` / `delete_duplicates` / `add_items` / `update_many`). |
 | `question` | User asks for advice or a number (*"how much protein today?"*, *"what should I eat for dinner?"*, *"give me a recipe for X"*, or any follow-up to bot suggestions). | `advisor.answer_question` + fire-and-forget `advisor.schedule_ingest('question', ...)`. |
 | `cmd_today` | Natural-language ask for today's summary. | `advisor.today_summary`. |
-| `cmd_date_query` | Asks about a specific past day (*"yesterday"*, *"Tuesday"*, *"April 7th"*). | `analyzer.extract_query_date` → `advisor.day_summary`. |
+| `cmd_date_query` | Asks about FOOD for a specific past day (*"what did I eat yesterday"*, *"my meals on Tuesday"*, *"food on April 7th"*). Weight, body metric, or stat questions about a past day go to `question` instead — see the intent prompt for the explicit list. | `analyzer.extract_query_date` → `advisor.day_summary`. |
 | `cmd_week` | Wants the FULL weekly review (*"weekly review"*, *"how was my week"*). | `advisor.weekly_review`. Specific-aspect-of-this-week questions go to `question`, not `cmd_week`. |
 | `cmd_goal` | Set a calorie number (*"set my goal to 1800"*). Bare number-extraction via `analyzer.extract_goal_from_text`. | `wiki.set_daily_kcal` under the per-user lock. |
 | `cmd_lint` | User asks the bot to tidy / clean / dedupe its own notes. | Delegates to `cmd_lint`. |
@@ -912,18 +912,43 @@ transcript. Assistant turns longer than 400 characters are truncated —
 the router only needs the gist of what the bot just said.
 **Called from:** `detect_intent`, `resolve_correction`.
 
-#### `detect_intent(text, history=None) → str`
+#### `detect_intent(text, history=None) → (intent, topic)`
+
+Returns a **tuple** of `(intent, topic)`.
+
 Three short-circuits before the LLM call: messages starting with `/`
-return `"command"`; messages starting with the iPhone Shortcut prefixes
-(`📊 health`, `🏋️ workouts`) return `health_update` / `workout_log`.
+return `("command", None)`; messages starting with the iPhone Shortcut
+prefixes (`📊 health`, `🏋️ workouts`) return `("health_update", None)`
+/ `("workout_log", None)`.
+
 Otherwise asks Haiku for one of: `log_text`, `correction`, `question`,
 `cmd_today`, `cmd_date_query`, `cmd_week`, `cmd_goal`, `cmd_lint`,
-`remember`. Cleans the LLM reply tolerantly (strips quotes, backticks,
-punctuation) and falls back to **keyword heuristics on API errors** —
-including "change", "fix", "wrong", "actually", "remove", "delete"
-(and Russian "поменя", "измени", "исправ", "удали") → `correction`;
-"how", "what", "сколько" or trailing `?` → `question`; otherwise
-`log_text`.
+`remember` — optionally with a `:weight` suffix for `question` intent.
+
+**Topic tagging (issue #24).** The intent classifier prompt instructs
+Haiku to append `:weight` to `question` when the message is about
+weight, body composition, body progress, fitness changes, scale data,
+or related body metrics — *semantically*, not via keywords. So *"show
+me my body progress"* → `question:weight` even though the word
+"weight" isn't there. Examples in the prompt anchor the behaviour.
+
+Topic values currently recognised: `"weight"` only. Any other suffix
+Haiku might output (`question:food`, `question:other`, …) is silently
+ignored — we'd rather drop a tag than misroute on garbage. The intent
+itself is still accepted regardless.
+
+The parsing splits on the first `:`, validates each half independently,
+and falls back to the existing valid-word search if the intent part
+isn't recognised.
+
+Cleans the LLM reply tolerantly (strips quotes, backticks, trailing
+punctuation; preserves `:` so the topic survives). Falls back to
+**keyword heuristics on API errors** — including "change", "fix",
+"wrong", "actually", "remove", "delete" (and Russian "поменя",
+"измени", "исправ", "удали") → `("correction", None)`; "how", "what",
+"сколько" or trailing `?` → `("question", None)`; otherwise
+`("log_text", None)`. No topic tagging in the fallback — when the API
+is down, the snapshot-only weight context is acceptable.
 
 ### 7.6 Date + goal + activity helpers
 
@@ -1033,11 +1058,56 @@ string if there's no data.
   distance, and a "pace per month + weeks-to-target" projection when
   the trend is heading toward the target.
 
-#### `_fmt_weight_context_for_prompt(user_id) → str`
+#### `_fmt_weight_context_for_prompt(user_id, include_history=False) → str`
 
-Compact text describing the weight situation, suitable for injection
-into a Sonnet system prompt (`answer_question`, `evening_summary`,
-`weekly_review`). Empty string if no data.
+Two-tier weight summary for injection into Sonnet's system prompt
+(`answer_question`, `evening_summary`, `weekly_review`). Empty string
+if there's no weight data.
+
+**Tier 1 — always sent** (when there's data, regardless of the flag):
+1. *"Weight context — Weight today: …; yesterday …; …"* — the
+   snapshot (current + day/week/month deltas + pace + target distance).
+2. *"Lifetime span: FIRST → LAST (N readings, lifetime min X, max Y)."*
+   — one-line global anchor from `db.get_lifetime_weight_stats`.
+
+These are ~200 tokens total — negligible cost. Sent on every Sonnet
+call that uses this helper.
+
+**Tier 2 — opt-in via `include_history=True`**:
+3. *"Daily weight history (oldest first; each row is that day's
+   morning-low):"* — the full daily-min series from
+   `db.get_daily_min_weights`. One row per day Maria weighed in,
+   in the form `YYYY-MM-DD  X.X`. Sonnet computes whatever
+   aggregation the question needs (weekly average, quarterly median,
+   year-over-year, trend over arbitrary window, …) from this series.
+
+This section is ~8 k tokens for 5 years of data. Reserved for cases
+where the user is likely to ask a statistical question:
+
+| Caller | `include_history` | Rationale |
+| --- | --- | --- |
+| `weekly_review` | `True` | Trend analysis is the whole point. Once/week → cheap. |
+| `evening_summary` | `False` (default) | AI analysis is meal-focused; snapshot is plenty. |
+| `answer_question` | `topic == "weight"` | Driven by the intent classifier's `:weight` tag (issue #24) — semantic classification, free, no added latency. See §7.5 detect_intent. |
+
+The deliberate design choice (per issue #24) is to **not pre-bake
+specific aggregations** (monthly / yearly / weekly / etc.) — that
+forces us to anticipate every question shape, and weight questions
+come in too many flavours. The lifetime line + daily-min series
+together give Sonnet enough to compute essentially any
+statistical-aggregation question without us writing per-question
+handlers.
+
+Why the topic tag and not a keyword check: keyword matching misses
+synonyms and oblique phrasings (*"show me my body progress"*, *"how
+am I changing physically?"*, *"am I getting leaner?"* — none contain
+"weight" / "kg" / "lose"). Haiku-driven semantic classification picks
+those up correctly. The classification rides on the existing intent
+call so it costs zero extra API time or money.
+
+Approximate monthly cost added (Sonnet 4.6 at $3/M input):
+~$0.50–$2.00 depending on question volume (1–15 weight questions per
+day). Without the gating it would be ~$4–7/month.
 
 #### Surfacing — where each helper is used
 
