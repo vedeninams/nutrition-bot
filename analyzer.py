@@ -370,7 +370,12 @@ def analyze_food_photo(
     """
     user_text = caption or "Please analyze this food photo."
     response = client.messages.create(
-        model="claude-opus-4-6",
+        # Sonnet 4.6 (was Opus 4.6) — issue #26 cost cut. ~5x cheaper on
+        # input + output. Sonnet has vision too; slight accuracy gap vs
+        # Opus on tricky multi-component plates, big enough cost gap that
+        # the tradeoff is worth it. Revert this single line if quality
+        # drops too far in practice.
+        model="claude-sonnet-4-6",
         max_tokens=1024,
         system=FOOD_SYSTEM_PROMPT,
         messages=[
@@ -404,7 +409,10 @@ def analyze_label_photo(
     """
     user_text = caption or "Please read this nutrition label."
     response = client.messages.create(
-        model="claude-opus-4-6",
+        # Sonnet 4.6 (was Opus 4.6) — issue #26 cost cut. Labels are simpler
+        # OCR than food plates, so Sonnet's accuracy here is even closer to
+        # Opus's than for food photos.
+        model="claude-sonnet-4-6",
         max_tokens=512,
         system=LABEL_SYSTEM_PROMPT,
         messages=[

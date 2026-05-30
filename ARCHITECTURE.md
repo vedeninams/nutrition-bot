@@ -805,11 +805,19 @@ on photos, text-to-nutrition, intent classification, correction
 resolution), parsing iPhone Shortcut messages, and one-off LLM helpers
 (date extraction, profile updates, activity calorie estimates).
 
-Model choice is consistent: vision uses `claude-opus-4-6` (best image
-understanding); text food parsing, intent, correction, date extraction,
-profile updates, and activity estimation use `claude-haiku-4-5` (cheap,
-fast, narrow tasks). Sonnet 4.6 is reserved for `advisor.py`'s
-open-ended reasoning.
+Model choice (after issue #26 cost-cut):
+
+- **Vision** (`analyze_food_photo`, `analyze_label_photo`) uses
+  `claude-sonnet-4-6`. Originally Opus 4.6 for best-in-class vision,
+  swapped to Sonnet to cut ~$3/month — Sonnet has vision too, with a
+  small accuracy gap on tricky multi-component plates that's been
+  judged worth the cost reduction. Easy single-line revert (in
+  `analyzer.py`) if quality drops too far in real use.
+- **Text food parsing, intent, correction, date extraction, profile
+  updates, activity estimation, ingest, lint, contradictions** use
+  `claude-haiku-4-5` (cheap, fast, narrow tasks).
+- **Open-ended reasoning** (`weekly_review`, `evening_summary`,
+  `answer_question`) uses `claude-sonnet-4-6`.
 
 ### 7.1 System prompts
 
