@@ -176,30 +176,32 @@ def _decode_weight(value: int, unit: int) -> float:
     return value * (10 ** unit)
 
 
-def fetch_recent_weights(
+def fetch_weights_in_range(
     user_id: int,
-    days: int = 2,
+    start_ts: int,
+    end_ts: int,
 ) -> Optional[list[dict]]:
-    """Call Withings measure?action=getmeas for the last `days` days.
-    Returns a list of {measured_at: ISO, weight_kg: float} dicts, or None
-    on transport/API failure.
+    """Call Withings measure?action=getmeas for an arbitrary Unix-timestamp
+    range. Returns a list of {measured_at: ISO, weight_kg: float} dicts, or
+    None on transport/API failure.
 
-    Idempotent re-fetching: the DB insert dedups on (user_id, measured_at)
-    so calling this repeatedly with overlapping windows is fine.
+    For the hourly cron, callers use the convenience wrapper
+    `fetch_recent_weights(user_id, days=N)`. For bulk imports of years of
+    history, `sync_user_range(user_id, start_ts, end_ts, chunk_days=...)`
+    chunks the range and stitches results together — Withings' API caps
+    responses to roughly a few hundred measurements per call, so a 5-year
+    request in one shot silently truncates.
     """
     auth = ensure_fresh_token(user_id)
     if not auth:
         return None
 
-    end_ts = int(time.time())
-    start_ts = end_ts - days * 86400
-
     payload = {
         "action": "getmeas",
         "meastype": str(WITHINGS_TYPE_WEIGHT),
         "category": "1",          # 1 = real measurements (not user-entered targets)
-        "startdate": str(start_ts),
-        "enddate": str(end_ts),
+        "startdate": str(int(start_ts)),
+        "enddate": str(int(end_ts)),
     }
     headers = {"Authorization": f"Bearer {auth['access_token']}"}
 
@@ -235,13 +237,32 @@ def fetch_recent_weights(
     return readings
 
 
+def fetch_recent_weights(
+    user_id: int,
+    days: int = 2,
+) -> Optional[list[dict]]:
+    """Convenience wrapper for the hourly cron: "give me the last N days."
+    Returns the same shape as fetch_weights_in_range, or None on failure.
+
+    Idempotent re-fetching: the DB insert dedups on (user_id, measured_at)
+    so calling this repeatedly with overlapping windows is fine.
+    """
+    end_ts = int(time.time())
+    start_ts = end_ts - days * 86400
+    return fetch_weights_in_range(user_id, start_ts, end_ts)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Per-user sync
 # ─────────────────────────────────────────────────────────────────────────────
 
 def sync_user(user_id: int, days: int = 2) -> dict:
     """Refresh tokens if needed, fetch last `days` of readings, insert any
-    new ones. Returns a small stats dict for logging."""
+    new ones. Returns a small stats dict for logging.
+
+    For ranges longer than ~6 months use `sync_user_range` instead — a
+    single getmeas response is capped by Withings around a few hundred
+    measurements, so a "last 5 years" request silently truncates."""
     readings = fetch_recent_weights(user_id, days=days)
     if readings is None:
         return {"user_id": user_id, "ok": False, "fetched": 0, "inserted": 0}
@@ -262,6 +283,80 @@ def sync_user(user_id: int, days: int = 2) -> dict:
     return {"user_id": user_id, "ok": True, "fetched": len(readings), "inserted": inserted}
 
 
+def sync_user_range(
+    user_id: int,
+    start_ts: int,
+    end_ts: int,
+    chunk_days: int = 90,
+) -> dict:
+    """Pull every reading between (start_ts, end_ts), splitting the range
+    into `chunk_days`-sized windows so we don't hit Withings' per-call
+    measurement cap. Used for bulk historical imports — see the --since
+    CLI flag.
+
+    Walks backwards from end_ts toward start_ts. Logs progress per chunk.
+    Returns a small stats dict like sync_user.
+    """
+    if start_ts >= end_ts:
+        return {"user_id": user_id, "ok": False, "fetched": 0, "inserted": 0,
+                "chunks": 0, "reason": "start >= end"}
+
+    chunk_seconds = max(1, chunk_days) * 86400
+    cursor = end_ts
+    chunks = 0
+    total_fetched = 0
+    total_inserted = 0
+    fail_count = 0
+
+    while cursor > start_ts:
+        chunk_start = max(start_ts, cursor - chunk_seconds)
+        chunks += 1
+        # Human-readable window for the log line.
+        win_start = datetime.fromtimestamp(chunk_start, tz=timezone.utc).strftime("%Y-%m-%d")
+        win_end   = datetime.fromtimestamp(cursor,      tz=timezone.utc).strftime("%Y-%m-%d")
+
+        readings = fetch_weights_in_range(user_id, chunk_start, cursor)
+        if readings is None:
+            log.warning(f"user={user_id} chunk {win_start} → {win_end}: API call failed")
+            fail_count += 1
+            # Move on; don't let one bad chunk kill the whole import.
+            cursor = chunk_start
+            continue
+
+        new_in_chunk = 0
+        for r in readings:
+            if db.insert_weight_reading(
+                user_id=user_id,
+                measured_at=r["measured_at"],
+                weight_kg=r["weight_kg"],
+                source="withings_api",
+            ):
+                new_in_chunk += 1
+
+        total_fetched += len(readings)
+        total_inserted += new_in_chunk
+        log.info(
+            f"user={user_id} chunk {win_start} → {win_end}: "
+            f"fetched={len(readings)} new={new_in_chunk}"
+        )
+        cursor = chunk_start
+
+        # Polite spacing between calls so we don't trigger any rate-limit
+        # behaviour on a long import. Withings is generous but a half-second
+        # nap costs us nothing on a once-in-a-lifetime backfill.
+        time.sleep(0.5)
+
+    log.info(
+        f"user={user_id} bulk import done: chunks={chunks} "
+        f"fetched={total_fetched} new={total_inserted} failed_chunks={fail_count}"
+    )
+    return {
+        "user_id": user_id, "ok": fail_count == 0,
+        "chunks": chunks, "failed_chunks": fail_count,
+        "fetched": total_fetched, "inserted": total_inserted,
+    }
+
+
 def sync_all_users(days: int = 2) -> list[dict]:
     """Iterate every user who has stored Withings tokens."""
     user_ids = db.list_withings_users()
@@ -278,7 +373,16 @@ def main() -> None:
     parser.add_argument("--user", type=int, default=None,
                         help="Sync only this Telegram user_id")
     parser.add_argument("--days", type=int, default=2,
-                        help="How many days of history to fetch (default 2)")
+                        help="How many days of history to fetch (default 2). "
+                             "For ranges longer than ~6 months prefer --since "
+                             "which uses chunked sync.")
+    parser.add_argument("--since", type=str, default=None,
+                        help="YYYY-MM-DD — bulk import from this date forward. "
+                             "Splits the range into 90-day chunks to avoid "
+                             "Withings' per-call measurement cap. Requires "
+                             "--user. Idempotent — re-running is safe.")
+    parser.add_argument("--chunk-days", type=int, default=90,
+                        help="Chunk size for --since (default 90 days).")
     args = parser.parse_args()
 
     if not WITHINGS_CLIENT_ID or not WITHINGS_CLIENT_SECRET:
@@ -287,6 +391,29 @@ def main() -> None:
 
     db.init_db()
 
+    # ── Bulk import path (--since YYYY-MM-DD) ───────────────────────────────
+    if args.since:
+        if not args.user:
+            log.error("--since requires --user (bulk import is per-user)")
+            sys.exit(1)
+        try:
+            since_dt = datetime.strptime(args.since, "%Y-%m-%d").replace(
+                tzinfo=timezone.utc
+            )
+        except ValueError:
+            log.error(f"--since must be YYYY-MM-DD format; got {args.since!r}")
+            sys.exit(1)
+        start_ts = int(since_dt.timestamp())
+        end_ts = int(time.time())
+        log.info(
+            f"BULK IMPORT user={args.user} from {args.since} to today, "
+            f"chunk_days={args.chunk_days}"
+        )
+        result = sync_user_range(args.user, start_ts, end_ts, chunk_days=args.chunk_days)
+        log.info(f"done: {result}")
+        return
+
+    # ── Hourly cron path (--days N, default 2) ──────────────────────────────
     if args.user:
         result = sync_user(args.user, days=args.days)
         log.info(f"done: {result}")
