@@ -495,15 +495,6 @@ def weekly_review(user_id: int) -> str:
     avg_prot_month = _avg(month_data, "protein_g")
     days_on_track  = sum(1 for r in this_week if abs(r["kcal"] - goal) / goal < 0.15)
 
-    # Weight trend from activity stats
-    weights = [(s["date"], s["weight_kg"]) for s in week_stats if s.get("weight_kg")]
-    weight_line = ""
-    if weights:
-        w_first, w_last = weights[0][1], weights[-1][1]
-        delta = w_last - w_first
-        arrow = f"↓ {abs(delta):.1f} kg" if delta < 0 else (f"↑ {delta:.1f} kg" if delta > 0 else "stable")
-        weight_line = f"Weight: {w_first:.1f} → {w_last:.1f} kg ({arrow})"
-
     # Stats header (numbers only, no AI)
     header_parts = [
         f"📅 *Sunday Review* ({len(month_data)} days logged)",
@@ -511,8 +502,13 @@ def weekly_review(user_id: int) -> str:
     ]
     if older:
         header_parts.append(f"Past month avg: {avg_kcal_month:.0f} kcal/day — {avg_prot_month:.0f}g protein")
-    if weight_line:
-        header_parts.append(weight_line)
+
+    # Weight block (richer "weekly" mode — start→end, month delta, target progress + pace).
+    # Reads from weight_readings (issue #7); empty string if no readings yet,
+    # in which case we don't add a weight line at all.
+    weight_block = _fmt_weight_block(user_id, mode="weekly")
+    if weight_block:
+        header_parts.append(weight_block)
     header = "\n".join(header_parts)
 
     # Build data summary for Claude
@@ -523,9 +519,12 @@ def weekly_review(user_id: int) -> str:
     )
 
     profile = wiki.read_wiki_for_prompt(user_id)
+    weight_context_for_prompt = _fmt_weight_context_for_prompt(user_id)
+
     prompt = f"""You are a supportive personal nutritionist sending a detailed Sunday weekly review to your client.
 
 User's daily calorie goal: {goal} kcal
+{weight_context_for_prompt}
 {f"What I know about this user (long-term memory):{chr(10)}{profile}" if profile else ""}
 
 Data for the past {len(month_data)} days (all available history):
@@ -533,11 +532,11 @@ Data for the past {len(month_data)} days (all available history):
 
 Write a concise review in exactly 3 short paragraphs, each separated by a blank line. Keep it tight — the user wants signal, not padding.
 
-Paragraph 1 — This week verdict: overall calorie consistency + protein, with specific numbers and a clear verdict. Mention the best and worst day briefly.
+Paragraph 1 — This week verdict: overall calorie consistency + protein, with specific numbers and a clear verdict. Mention the best and worst day briefly. If weight context is available, weave in this week's weight movement.
 
-Paragraph 2 — The main pattern worth noticing: one observation from the longer arc (or this week's highlight if no longer history exists). Combine wins and gaps honestly.
+Paragraph 2 — The main pattern worth noticing: one observation from the longer arc. Combine wins and gaps honestly. If a weight trend is visible (steady, down, up), call it out and connect it to the eating pattern.
 
-Paragraph 3 — One concrete recommendation for the coming week, tied directly to what you just said.
+Paragraph 3 — One concrete recommendation for the coming week, tied directly to what you just said. If a target weight exists, frame the recommendation around progress toward it.
 
 Each paragraph should be 2-3 sentences MAX. Warm, coach-like tone. No bullet points. No headers. Just short paragraphs.
 Use Telegram formatting: *bold* sparingly for key numbers.
@@ -572,10 +571,12 @@ def answer_question(user_id: int, question: str, conversation: list[dict] | None
     week = db.get_week_totals(user_id)
 
     profile = wiki.read_wiki_for_prompt(user_id)
+    weight_context_for_prompt = _fmt_weight_context_for_prompt(user_id)
     context = f"""You are a friendly, knowledgeable personal nutritionist.
 You have access to the user's food tracking data below. Use it when relevant.
 
 User's current daily calorie goal: {goal} kcal
+{weight_context_for_prompt}
 Today's logged meals: {json.dumps(today_meals, default=str)}
 This week's daily totals: {json.dumps(week, default=str)}
 {f"{chr(10)}What I know about this user (long-term memory):{chr(10)}{profile}" if profile else ""}
@@ -729,6 +730,247 @@ def _fmt_activity(stats: dict) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Weight tracking — analysis + display helpers
+#
+# Reads from the `weight_readings` table populated by withings_sync.py (issue
+# #7 plumbing) and the target weight in goals.md. All helpers gracefully
+# return empty/None when there's no data — they're safe to call on a fresh
+# user who hasn't connected Withings yet.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _weight_context(user_id: int) -> dict:
+    """Compute weight stats for summaries and Q&A.
+
+    Returns a dict with whatever's computable. All numeric values may be None
+    when there isn't enough data. Shape:
+
+        {
+            "current_kg":     float | None,  # most recent reading
+            "yesterday_kg":   float | None,  # min reading from yesterday
+            "week_ago_kg":    float | None,  # min reading from ~7 days back
+            "month_ago_kg":   float | None,  # min reading from ~30 days back
+            "delta_day":      float | None,  # current - yesterday
+            "delta_week":     float | None,  # current - week_ago
+            "delta_month":    float | None,  # current - month_ago
+            "target_kg":      float | None,  # from goals.md
+            "delta_target":   float | None,  # current - target_kg (signed)
+            "pace_kg_per_wk": float | None,  # average weekly trend over 30 days
+            "history":        list[dict],    # last 30 days of (date, weight_kg)
+        }
+    """
+    out = {
+        "current_kg": None, "yesterday_kg": None,
+        "week_ago_kg": None, "month_ago_kg": None,
+        "delta_day": None, "delta_week": None, "delta_month": None,
+        "target_kg": None, "delta_target": None,
+        "pace_kg_per_wk": None,
+        "history": [],
+    }
+
+    # Per-date min series for trend math. Pulls last 35 days to give headroom
+    # for the "7 days ago" / "30 days ago" lookups.
+    today = date.today()
+    since = (today - timedelta(days=35)).isoformat()
+    history = db.get_daily_min_weights(user_id, since=since)
+    out["history"] = history
+
+    if not history:
+        # No raw readings yet — fall back to most recent individual reading
+        # or legacy daily_stats.weight_kg so we still display SOMETHING.
+        latest = db.get_latest_weight_reading(user_id)
+        out["current_kg"] = (
+            latest["weight_kg"] if latest else db.get_latest_weight(user_id)
+        )
+        target = wiki.get_target_weight(user_id)
+        if target is not None:
+            out["target_kg"] = target
+            if out["current_kg"] is not None:
+                out["delta_target"] = out["current_kg"] - target
+        return out
+
+    by_date = {row["date"]: row["weight_kg"] for row in history}
+
+    # current_kg = today's morning-low if we have a reading today, else the
+    # most recent day's min in the history. We deliberately use the day-min
+    # (not the most-recent individual reading) so it's consistent with the
+    # deltas (also day-mins) and stable across the day.
+    today_str = today.isoformat()
+    if today_str in by_date:
+        out["current_kg"] = by_date[today_str]
+    else:
+        out["current_kg"] = history[-1]["weight_kg"]
+
+    def _lookup_around(target_date: date, window_days: int = 3) -> Optional[float]:
+        """Return the weight nearest to target_date within ±window_days."""
+        for offset in range(window_days + 1):
+            for sign in (0, -1, 1):
+                d = (target_date + timedelta(days=sign * offset)).isoformat()
+                if d in by_date:
+                    return by_date[d]
+        return None
+
+    out["yesterday_kg"] = _lookup_around(today - timedelta(days=1), window_days=1)
+    out["week_ago_kg"]  = _lookup_around(today - timedelta(days=7), window_days=2)
+    out["month_ago_kg"] = _lookup_around(today - timedelta(days=30), window_days=4)
+
+    if out["current_kg"] is not None:
+        if out["yesterday_kg"] is not None:
+            out["delta_day"] = out["current_kg"] - out["yesterday_kg"]
+        if out["week_ago_kg"] is not None:
+            out["delta_week"] = out["current_kg"] - out["week_ago_kg"]
+        if out["month_ago_kg"] is not None:
+            out["delta_month"] = out["current_kg"] - out["month_ago_kg"]
+
+    # Pace: linear weekly trend from the oldest reading in the window to the
+    # current. Simple end-to-end average; doesn't try to be clever about
+    # short-term noise. Only computed if we have at least 14 days of data.
+    if len(history) >= 14:
+        first = history[0]
+        last = history[-1]
+        try:
+            d_start = date.fromisoformat(first["date"])
+            d_end = date.fromisoformat(last["date"])
+            span_days = max(1, (d_end - d_start).days)
+            kg_change = last["weight_kg"] - first["weight_kg"]
+            out["pace_kg_per_wk"] = kg_change / span_days * 7
+        except (ValueError, KeyError):
+            pass
+
+    # Target weight + distance.
+    target = wiki.get_target_weight(user_id)
+    if target is not None:
+        out["target_kg"] = target
+        if out["current_kg"] is not None:
+            out["delta_target"] = out["current_kg"] - target
+
+    return out
+
+
+def _fmt_arrow_delta(delta: float, unit: str = "kg") -> str:
+    """Render a signed delta with an arrow.
+        +0.3 → '↑ 0.3 kg'
+        -0.2 → '↓ 0.2 kg'
+         0.0 → 'steady'
+    """
+    if abs(delta) < 0.05:
+        return "steady"
+    arrow = "↑" if delta > 0 else "↓"
+    return f"{arrow} {abs(delta):.1f} {unit}"
+
+
+def _fmt_weight_block(user_id: int, mode: str = "evening") -> str:
+    """Format a weight block for inclusion in a summary.
+
+    Returns empty string if there's no weight data at all (so the caller
+    can append unconditionally without checking).
+
+    Args:
+        mode: 'evening' for compact 2–3 lines (evening push, /today),
+              'weekly' for a richer block (Sunday review).
+    """
+    ctx = _weight_context(user_id)
+    cur = ctx["current_kg"]
+    if cur is None:
+        return ""
+
+    lines: list[str] = []
+
+    if mode == "weekly":
+        # Header: this-week start → current, plus one-line delta.
+        wk = ctx["week_ago_kg"]
+        if wk is not None:
+            lines.append(f"⚖️ Weight: *{wk:.1f} → {cur:.1f} kg* this week ({_fmt_arrow_delta(cur - wk)})")
+        else:
+            lines.append(f"⚖️ Weight: *{cur:.1f} kg*")
+
+        if ctx["delta_month"] is not None:
+            lines.append(f"   {_fmt_arrow_delta(ctx['delta_month'])} over the past month")
+
+        if ctx["target_kg"] is not None and ctx["delta_target"] is not None:
+            dt = ctx["delta_target"]
+            if abs(dt) < 0.3:
+                lines.append(f"   🎯 At your *{ctx['target_kg']:.0f} kg* target")
+            else:
+                direction = "to lose" if dt > 0 else "to gain"
+                lines.append(f"   🎯 *{abs(dt):.1f} kg {direction}* — target {ctx['target_kg']:.0f} kg")
+
+            pace = ctx["pace_kg_per_wk"]
+            # Only narrate pace if it's heading toward the target.
+            if pace is not None and abs(pace) >= 0.05:
+                target_heading = "down" if dt > 0 else "up"
+                pace_heading = "down" if pace < 0 else "up"
+                if target_heading == pace_heading:
+                    weeks = max(1, round(abs(dt) / max(0.05, abs(pace))))
+                    lines.append(
+                        f"   📈 Trend: {_fmt_arrow_delta(pace * 4)} per month "
+                        f"— at this pace, ~{weeks} week(s) to target"
+                    )
+                else:
+                    lines.append(
+                        f"   📈 Trend: {_fmt_arrow_delta(pace * 4)} per month "
+                        f"(opposite direction from target)"
+                    )
+
+    else:  # mode == "evening" — keep it compact
+        lines.append(f"⚖️ Weight: *{cur:.1f} kg*")
+
+        # Combine day + week deltas into one line if both present.
+        deltas: list[str] = []
+        if ctx["delta_day"] is not None:
+            deltas.append(f"{_fmt_arrow_delta(ctx['delta_day'])} vs yesterday")
+        if ctx["delta_week"] is not None:
+            deltas.append(f"{_fmt_arrow_delta(ctx['delta_week'])} vs last week")
+        if deltas:
+            lines.append("   " + " • ".join(deltas))
+
+        if ctx["target_kg"] is not None and ctx["delta_target"] is not None:
+            dt = ctx["delta_target"]
+            if abs(dt) < 0.3:
+                lines.append(f"   🎯 At your *{ctx['target_kg']:.0f} kg* target")
+            else:
+                direction = "to lose" if dt > 0 else "to gain"
+                lines.append(f"   🎯 *{abs(dt):.1f} kg {direction}* to your {ctx['target_kg']:.0f} kg target")
+
+    return "\n".join(lines)
+
+
+def _fmt_weight_context_for_prompt(user_id: int) -> str:
+    """Compact text block describing the user's current weight situation,
+    suitable for injection into an LLM system prompt (answer_question,
+    evening_summary's analysis paragraph, weekly_review).
+
+    Returns empty string if there's no weight data.
+    """
+    ctx = _weight_context(user_id)
+    cur = ctx["current_kg"]
+    if cur is None:
+        return ""
+
+    parts = [f"Weight today: {cur:.1f} kg"]
+    if ctx["yesterday_kg"] is not None:
+        parts.append(f"yesterday {ctx['yesterday_kg']:.1f} kg")
+    if ctx["week_ago_kg"] is not None:
+        parts.append(f"a week ago {ctx['week_ago_kg']:.1f} kg")
+    if ctx["month_ago_kg"] is not None:
+        parts.append(f"a month ago {ctx['month_ago_kg']:.1f} kg")
+    if ctx["pace_kg_per_wk"] is not None:
+        sign = "down" if ctx["pace_kg_per_wk"] < 0 else "up"
+        parts.append(f"30-day trend: {sign} {abs(ctx['pace_kg_per_wk']):.2f} kg/week")
+    if ctx["target_kg"] is not None:
+        if ctx["delta_target"] is not None:
+            dt = ctx["delta_target"]
+            if abs(dt) < 0.3:
+                parts.append(f"AT target ({ctx['target_kg']:.0f} kg)")
+            else:
+                direction = "to lose" if dt > 0 else "to gain"
+                parts.append(f"{abs(dt):.1f} kg {direction} to reach target {ctx['target_kg']:.0f} kg")
+        else:
+            parts.append(f"target {ctx['target_kg']:.0f} kg")
+
+    return "Weight context — " + "; ".join(parts) + "."
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 5. Day summary -works for any date (today, yesterday, etc.)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -827,6 +1069,9 @@ def evening_summary(user_id: int) -> str:
     eaten = today_totals.get("kcal", 0)
     pct = int(eaten / goal * 100) if goal else 0
 
+    # Compact weight context block — empty string if no readings yet.
+    weight_context_for_prompt = _fmt_weight_context_for_prompt(user_id)
+
     prompt = f"""You are a supportive personal nutritionist sending a short evening check-in message.
 
 Today's summary:
@@ -835,6 +1080,7 @@ Today's summary:
 - Fat: {today_totals.get('fat_g', 0):.0f}g
 - Carbs: {today_totals.get('carbs_g', 0):.0f}g
 {f'- Estimated burn: {burned:.0f} kcal (net {eaten - burned:.0f} kcal)' if burned else ''}
+{weight_context_for_prompt}
 
 Last 5 days:
 {past_lines}
@@ -843,8 +1089,8 @@ Last 5 days:
 
 Write a SHORT evening message in exactly 3 separate paragraphs (one sentence each, separated by a blank line):
 
-Paragraph 1: What went well today — be specific (mention protein, staying under goal, balance, variety, etc.)
-Paragraph 2: A pattern you notice from the last 5 days (e.g. consistently low protein, good calorie control, heavy on carbs, etc.)
+Paragraph 1: What went well today — be specific (mention protein, staying under goal, balance, variety, etc.). If weight context is provided, you may reference it here when relevant.
+Paragraph 2: A pattern you notice from the last 5 days (e.g. consistently low protein, good calorie control, heavy on carbs, etc.). If a clear weight trend exists, you can highlight that instead.
 Paragraph 3: One concrete, actionable tip for tomorrow based on what you see.
 
 Be warm and specific, not generic. Use Telegram formatting: *bold* for emphasis only.
@@ -858,10 +1104,13 @@ Reply in the same language the user typically uses."""
 
     analysis = response.content[0].text.strip()
 
-    # Assemble in the new order: totals → analysis → meal overview.
-    # The meals block comes from day_summary() with include_totals=False so
-    # the totals aren't duplicated (we already put them at the top).
+    # Assemble: totals → weight → analysis → meal overview.
+    # The weight block goes second so the headline numbers (kcal + weight)
+    # are both visible at a glance before the analysis paragraphs.
+    # The meals block uses include_totals=False so the totals aren't
+    # duplicated (we already put them at the top).
     totals_block = f"📋 *Today:*\n\n{_fmt_totals(today_totals, goal)}"
+    weight_block = _fmt_weight_block(user_id, mode="evening")
     meals_block = day_summary(
         user_id,
         date.today().isoformat(),
@@ -869,7 +1118,12 @@ Reply in the same language the user typically uses."""
         include_totals=False,
     )
 
-    return f"{totals_block}\n\n💬 {analysis}\n\n{meals_block}"
+    parts = [totals_block]
+    if weight_block:
+        parts.append(weight_block)
+    parts.append(f"💬 {analysis}")
+    parts.append(meals_block)
+    return "\n\n".join(parts)
 
 
 def today_summary(user_id: int) -> str:
