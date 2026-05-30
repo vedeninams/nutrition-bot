@@ -782,6 +782,14 @@ def _weight_context(user_id: int) -> dict:
         "current_kg": None, "yesterday_kg": None,
         "week_ago_kg": None, "month_ago_kg": None,
         "delta_day": None, "delta_week": None, "delta_month": None,
+        # Smoothed weekly averages (issue #29) — less noisy than the
+        # point-to-point week_ago_kg/cur comparison. Each is the mean of
+        # available daily-min readings in a 7-day window:
+        #   this_week_avg_kg : days  0–6  (today + 6 days back)
+        #   last_week_avg_kg : days  7–13 (7 to 13 days back)
+        # delta_week_avg = this_week_avg_kg - last_week_avg_kg.
+        "this_week_avg_kg": None, "last_week_avg_kg": None,
+        "delta_week_avg": None,
         "target_kg": None, "delta_target": None,
         "pace_kg_per_wk": None,
         "history": [],
@@ -841,6 +849,24 @@ def _weight_context(user_id: int) -> dict:
         if out["month_ago_kg"] is not None:
             out["delta_month"] = out["current_kg"] - out["month_ago_kg"]
 
+    # ── Smoothed weekly averages (issue #29) ────────────────────────────────
+    # The point-to-point week_ago vs current comparison is noisy — one
+    # unusually high/low morning on either side throws the delta off. The
+    # average-of-7-days vs average-of-the-7-before is much more stable.
+    def _avg_in_window(days_back_start: int, days_back_end: int) -> Optional[float]:
+        """Average of daily-min readings for the inclusive window
+        [today - days_back_end, today - days_back_start]."""
+        end_d = (today - timedelta(days=days_back_start)).isoformat()
+        start_d = (today - timedelta(days=days_back_end)).isoformat()
+        vals = [r["weight_kg"] for r in history
+                if start_d <= r["date"] <= end_d]
+        return sum(vals) / len(vals) if vals else None
+
+    out["this_week_avg_kg"] = _avg_in_window(0, 6)    # today + 6 days back
+    out["last_week_avg_kg"] = _avg_in_window(7, 13)   # 7 to 13 days back
+    if out["this_week_avg_kg"] is not None and out["last_week_avg_kg"] is not None:
+        out["delta_week_avg"] = out["this_week_avg_kg"] - out["last_week_avg_kg"]
+
     # Pace: linear weekly trend from the oldest reading in the window to the
     # current. Simple end-to-end average; doesn't try to be clever about
     # short-term noise. Only computed if we have at least 14 days of data.
@@ -896,9 +922,22 @@ def _fmt_weight_block(user_id: int, mode: str = "evening") -> str:
     lines: list[str] = []
 
     if mode == "weekly":
-        # Header: this-week start → current, plus one-line delta.
-        wk = ctx["week_ago_kg"]
-        if wk is not None:
+        # Header: prefer the smoothed week-vs-week average comparison (issue
+        # #29) — the avg-of-7-days vs avg-of-the-7-before is much less noisy
+        # than picking single readings 7 days apart, which can swing
+        # significantly on one unusual morning.
+        this_avg = ctx.get("this_week_avg_kg")
+        last_avg = ctx.get("last_week_avg_kg")
+        if this_avg is not None and last_avg is not None:
+            lines.append(
+                f"⚖️ Weight: *{cur:.1f} kg now* "
+                f"(this week avg {this_avg:.1f}, last week avg {last_avg:.1f} — "
+                f"{_fmt_arrow_delta(this_avg - last_avg)})"
+            )
+        elif ctx["week_ago_kg"] is not None:
+            # Fallback to point-to-point if we don't have ≥1 reading in each
+            # of the two 7-day windows yet (new user, sparse data).
+            wk = ctx["week_ago_kg"]
             lines.append(f"⚖️ Weight: *{wk:.1f} → {cur:.1f} kg* this week ({_fmt_arrow_delta(cur - wk)})")
         else:
             lines.append(f"⚖️ Weight: *{cur:.1f} kg*")
@@ -986,6 +1025,13 @@ def _fmt_weight_context_for_prompt(
         parts.append(f"yesterday {ctx['yesterday_kg']:.1f} kg")
     if ctx["week_ago_kg"] is not None:
         parts.append(f"a week ago {ctx['week_ago_kg']:.1f} kg")
+    # Smoothed weekly averages (issue #29) — more stable than picking
+    # single readings 7 days apart for the week-over-week comparison.
+    if ctx["this_week_avg_kg"] is not None and ctx["last_week_avg_kg"] is not None:
+        parts.append(
+            f"this week avg {ctx['this_week_avg_kg']:.1f} kg, "
+            f"last week avg {ctx['last_week_avg_kg']:.1f} kg"
+        )
     if ctx["month_ago_kg"] is not None:
         parts.append(f"a month ago {ctx['month_ago_kg']:.1f} kg")
     if ctx["pace_kg_per_wk"] is not None:
