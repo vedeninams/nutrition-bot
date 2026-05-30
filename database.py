@@ -142,6 +142,47 @@ def init_db():
 
             CREATE INDEX IF NOT EXISTS idx_convmsg_user_ts
                 ON conversation_messages (user_id, ts);
+
+            -- ─────────────────────────────────────────────
+            -- Raw weight readings (every weighing, not just one per day)
+            --
+            -- Each row is one reading from a scale — typically multiple
+            -- per day. `daily_stats.weight_kg` is automatically updated
+            -- to the MINIMUM reading for that date (the morning-low
+            -- convention), so existing summary code keeps working.
+            --
+            -- UNIQUE(user_id, measured_at) dedups when the polling
+            -- script catches the same Withings reading twice.
+            -- ─────────────────────────────────────────────
+            CREATE TABLE IF NOT EXISTS weight_readings (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id         INTEGER NOT NULL,
+                measured_at     TEXT    NOT NULL,
+                weight_kg       REAL    NOT NULL,
+                source          TEXT    DEFAULT 'withings_api',
+                inserted_at     TEXT    DEFAULT (datetime('now')),
+                UNIQUE(user_id, measured_at),
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_weight_readings_user_date
+                ON weight_readings (user_id, measured_at);
+
+            -- ─────────────────────────────────────────────
+            -- Withings OAuth tokens (one row per user who's connected
+            -- their Withings account). The polling script reads these
+            -- to call the Withings API; the bootstrap setup_withings.py
+            -- writes them after the user authorizes.
+            -- ─────────────────────────────────────────────
+            CREATE TABLE IF NOT EXISTS withings_auth (
+                user_id             INTEGER PRIMARY KEY,
+                access_token        TEXT    NOT NULL,
+                refresh_token       TEXT    NOT NULL,
+                expires_at          TEXT    NOT NULL,
+                withings_user_id    TEXT,
+                updated_at          TEXT    DEFAULT (datetime('now')),
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            );
         """)
     # ── Migration: add dish_name to existing databases ───────────────────────
     # ALTER TABLE is a no-op if the column already exists would raise an
@@ -1040,6 +1081,230 @@ def get_latest_weight(user_id: int) -> Optional[float]:
     ).fetchone()
     conn.close()
     return row["weight_kg"] if row else None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Weight readings (raw history of every weighing)
+#
+# The Withings polling script writes here. `daily_stats.weight_kg` is kept
+# in sync as the MIN reading for each date (the morning-low convention),
+# so all existing summary code continues to see "one weight per day."
+# ─────────────────────────────────────────────────────────────────────────────
+
+def insert_weight_reading(
+    user_id: int,
+    measured_at: str,
+    weight_kg: float,
+    source: str = "withings_api",
+) -> bool:
+    """Insert one raw weight reading. Idempotent via UNIQUE(user_id, measured_at)
+    — re-inserting the same reading (same Withings timestamp) is a silent no-op.
+
+    Also keeps `daily_stats.weight_kg` in sync as the minimum reading for the
+    day this reading falls on (morning-low convention). Returns True if a new
+    row was actually inserted, False if it was a duplicate.
+    """
+    ensure_user(user_id)
+    conn = get_conn()
+    with conn:
+        cur = conn.execute(
+            """INSERT OR IGNORE INTO weight_readings
+                   (user_id, measured_at, weight_kg, source)
+               VALUES (?, ?, ?, ?)""",
+            (user_id, measured_at, float(weight_kg), source),
+        )
+        inserted = cur.rowcount > 0
+    conn.close()
+
+    if inserted:
+        # Update the canonical daily weight to the minimum of all readings
+        # for that calendar day. Done outside the INSERT transaction so the
+        # MIN aggregate sees the row we just wrote.
+        date_str = measured_at[:10]   # ISO YYYY-MM-DD prefix
+        _recompute_daily_weight(user_id, date_str)
+    return inserted
+
+
+def _recompute_daily_weight(user_id: int, date_str: str) -> None:
+    """Set `daily_stats.weight_kg` to the MIN(weight_kg) of all readings on
+    that date (or NULL if none). Called after every weight_readings insert.
+
+    Why min: morning weight is the canonical "true" reading. After breakfast,
+    coffee, water, etc., weight rises during the day. The lowest reading of
+    the day is the cleanest baseline for trend analysis.
+    """
+    conn = get_conn()
+    row = conn.execute(
+        """SELECT MIN(weight_kg) AS min_w FROM weight_readings
+           WHERE user_id = ? AND date(measured_at) = ?""",
+        (user_id, date_str),
+    ).fetchone()
+    min_w = row["min_w"] if row else None
+    if min_w is None:
+        conn.close()
+        return
+
+    # Upsert into daily_stats, only writing weight_kg (other columns
+    # preserved if the row already exists).
+    with conn:
+        existing = conn.execute(
+            "SELECT 1 FROM daily_stats WHERE user_id = ? AND date = ?",
+            (user_id, date_str),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                """UPDATE daily_stats SET weight_kg = ?, updated_at = datetime('now')
+                   WHERE user_id = ? AND date = ?""",
+                (min_w, user_id, date_str),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO daily_stats (user_id, date, weight_kg)
+                   VALUES (?, ?, ?)""",
+                (user_id, date_str, min_w),
+            )
+    conn.close()
+
+
+def get_weight_readings(
+    user_id: int,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    limit: Optional[int] = None,
+) -> list[dict]:
+    """Return raw weight readings ordered by measured_at ASC.
+
+    Args:
+        since:  optional lower bound (ISO datetime string).
+        until:  optional upper bound.
+        limit:  optional cap on number of rows.
+    """
+    conn = get_conn()
+    where = ["user_id = ?"]
+    params: list = [user_id]
+    if since:
+        where.append("measured_at >= ?")
+        params.append(since)
+    if until:
+        where.append("measured_at <= ?")
+        params.append(until)
+    sql = (
+        "SELECT * FROM weight_readings WHERE "
+        + " AND ".join(where)
+        + " ORDER BY measured_at"
+    )
+    if limit:
+        sql += " LIMIT ?"
+        params.append(int(limit))
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_latest_weight_reading(user_id: int) -> Optional[dict]:
+    """Most recent raw reading for this user, or None.
+
+    Different from `get_latest_weight()`, which returns the daily-stats
+    canonical value (the day's min). This returns the most recent INDIVIDUAL
+    weighing — useful when the bot needs to say "you weighed in at 67.3 kg
+    this morning."
+    """
+    conn = get_conn()
+    row = conn.execute(
+        """SELECT * FROM weight_readings
+           WHERE user_id = ?
+           ORDER BY measured_at DESC LIMIT 1""",
+        (user_id,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_daily_min_weights(
+    user_id: int,
+    since: Optional[str] = None,
+) -> list[dict]:
+    """Per-date MIN(weight_kg) from raw readings, oldest first.
+
+    Returns rows shaped {date: 'YYYY-MM-DD', weight_kg: float}. Used by
+    summaries for trend analysis (the canonical "weight per day" series).
+
+    Args:
+        since:  optional lower bound — date or ISO datetime. If None,
+                returns all days that have any reading.
+    """
+    conn = get_conn()
+    where = ["user_id = ?"]
+    params: list = [user_id]
+    if since:
+        where.append("date(measured_at) >= date(?)")
+        params.append(since)
+    sql = (
+        "SELECT date(measured_at) AS date, MIN(weight_kg) AS weight_kg "
+        "FROM weight_readings WHERE "
+        + " AND ".join(where)
+        + " GROUP BY date(measured_at) ORDER BY date"
+    )
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Withings OAuth tokens
+#
+# The bootstrap setup_withings.py writes here once per user. The polling
+# script reads, calls Withings' API, refreshes tokens as needed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_withings_auth(user_id: int) -> Optional[dict]:
+    """Return this user's Withings OAuth row as a dict, or None if not connected."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM withings_auth WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def save_withings_auth(
+    user_id: int,
+    access_token: str,
+    refresh_token: str,
+    expires_at: str,
+    withings_user_id: Optional[str] = None,
+) -> None:
+    """Upsert Withings OAuth tokens for this user.
+
+    Called once during initial setup; called again whenever the polling
+    script refreshes the access_token (refresh_token may also rotate).
+    """
+    ensure_user(user_id)
+    conn = get_conn()
+    with conn:
+        conn.execute(
+            """INSERT INTO withings_auth
+                 (user_id, access_token, refresh_token, expires_at,
+                  withings_user_id, updated_at)
+               VALUES (?, ?, ?, ?, ?, datetime('now'))
+               ON CONFLICT(user_id) DO UPDATE SET
+                 access_token     = excluded.access_token,
+                 refresh_token    = excluded.refresh_token,
+                 expires_at       = excluded.expires_at,
+                 withings_user_id = COALESCE(excluded.withings_user_id, withings_user_id),
+                 updated_at       = datetime('now')""",
+            (user_id, access_token, refresh_token, expires_at, withings_user_id),
+        )
+    conn.close()
+
+
+def list_withings_users() -> list[int]:
+    """Return user_ids that have stored Withings OAuth tokens.
+    Used by the polling script to iterate all connected users."""
+    conn = get_conn()
+    rows = conn.execute("SELECT user_id FROM withings_auth").fetchall()
+    conn.close()
+    return [r["user_id"] for r in rows]
 
 
 def get_profile_for_prompt(user_id: int) -> str:

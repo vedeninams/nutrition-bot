@@ -16,6 +16,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Paths
@@ -305,6 +306,123 @@ def set_daily_kcal(user_id: int, kcal: int) -> None:
     canonical = _CALORIE_GOAL_CANONICAL.format(kcal=int(kcal))
     new_content = _rewrite_goals_with_canonical(content, canonical)
     write_page(user_id, "goals", new_content)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Target weight — read/write helpers backed by goals.md
+#
+# Parallel to the calorie-goal plumbing above. One canonical line in goals.md:
+#   - **Target weight**: 62 kg
+# The Withings sync layer doesn't touch this — it's purely a user preference
+# the bot uses to add goal-progress framing to summaries ("1.8 kg away").
+# ─────────────────────────────────────────────────────────────────────────────
+
+_TARGET_WEIGHT_CANONICAL = "- **Target weight**: {kg} kg"
+
+# Lenient reader for legacy phrasings ("Goal weight: 62kg", "target 60 kilos",
+# "weight goal 62kg"). Requires `kg` unit so we never collide with the
+# `kcal` calorie line or generic "goal 100g protein" style bullets.
+_TARGET_WEIGHT_RE = re.compile(
+    r"^[ \t]*[-*+][ \t]+"                              # bullet marker
+    r"(?:\[\d{4}-\d{2}-\d{2}\][ \t]+)?"                # optional date prefix
+    r"(?:\*\*)?"                                        # optional open bold
+    r"(?:target|goal)[ \t]+(?:body[ \t]+)?weight"     # label
+    r"(?:\*\*)?"                                        # optional close bold
+    r"[ \t]*[:—–\-]?[ \t]*"                            # optional separator
+    r"(\d+(?:\.\d+)?)"                                  # the number (allow .5)
+    r"[ \t]*(?:kg|kilos?|kilograms?)\b"                # unit MUST be kg
+    r".*$",                                             # rest of line
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def get_target_weight(user_id: int, default: Optional[float] = None) -> Optional[float]:
+    """Read the target weight from goals.md. Returns `default` (None by default)
+    if the line is missing or malformed. Never crashes on hand-edits or
+    Haiku drift."""
+    content = read_page(user_id, "goals")
+    if not content:
+        return default
+    m = _TARGET_WEIGHT_RE.search(content)
+    if not m:
+        return default
+    try:
+        return float(m.group(1))
+    except (ValueError, AttributeError):
+        return default
+
+
+def set_target_weight(user_id: int, weight_kg: float) -> None:
+    """Upsert the canonical target-weight bullet in goals.md.
+
+    Strips every existing target-weight-ish line (canonical form, legacy
+    phrasings, Haiku-ingested prose) and inserts exactly one canonical
+    bullet right under the `# Goals` heading. All non-target-weight bullets
+    (calorie goal, sugar, protein, etc.) are preserved byte-for-byte since
+    this regex is scoped to the `kg` unit.
+
+    Caller is responsible for holding `get_lock(user_id)`.
+    """
+    ensure_user_wiki(user_id)
+    content = read_page(user_id, "goals")
+    # Format whole numbers without a trailing ".0" for tidy display.
+    kg = int(weight_kg) if weight_kg == int(weight_kg) else round(weight_kg, 1)
+    canonical = _TARGET_WEIGHT_CANONICAL.format(kg=kg)
+    new_content = _rewrite_goals_with_target_canonical(content, canonical)
+    write_page(user_id, "goals", new_content)
+
+
+def _rewrite_goals_with_target_canonical(content: str, canonical: str) -> str:
+    """Mirror of `_rewrite_goals_with_canonical` but scoped to the
+    target-weight regex. Strips matching lines, removes the empty
+    placeholder, collapses blank-line runs, inserts the canonical bullet
+    right under `# Goals` (or builds the heading if it didn't exist).
+    """
+    stripped = _TARGET_WEIGHT_RE.sub("", content)
+    stripped = strip_empty_placeholder(stripped)
+    stripped = re.sub(r"\n{3,}", "\n\n", stripped)
+
+    heading_re = re.compile(r"^#[ \t]+goals[ \t]*$", re.IGNORECASE | re.MULTILINE)
+    m = heading_re.search(stripped)
+    if m:
+        insert_at = m.end()
+        new_content = stripped[:insert_at] + "\n\n" + canonical + stripped[insert_at:]
+    else:
+        new_content = f"# Goals\n\n{canonical}\n\n{stripped.lstrip()}"
+
+    return re.sub(r"\n{3,}", "\n\n", new_content).rstrip() + "\n"
+
+
+def consolidate_target_weight_line(user_id: int) -> dict:
+    """Lint-time consolidation of any target-weight drift, mirroring
+    `consolidate_goal_line` for kcal. Keep the LAST number (later wins).
+    Returns {"found": N, "kept": float|None, "rewrote": bool}.
+
+    Caller holds `get_lock(user_id)`.
+    """
+    ensure_user_wiki(user_id)
+    content = read_page(user_id, "goals")
+    if not content:
+        return {"found": 0, "kept": None, "rewrote": False}
+
+    matches = list(_TARGET_WEIGHT_RE.finditer(content))
+    if not matches:
+        return {"found": 0, "kept": None, "rewrote": False}
+
+    try:
+        kept_value = float(matches[-1].group(1))
+    except (ValueError, AttributeError):
+        return {"found": len(matches), "kept": None, "rewrote": False}
+
+    kg = int(kept_value) if kept_value == int(kept_value) else round(kept_value, 1)
+    canonical = _TARGET_WEIGHT_CANONICAL.format(kg=kg)
+
+    rebuilt = _rewrite_goals_with_target_canonical(content, canonical)
+    if rebuilt == content:
+        return {"found": len(matches), "kept": kept_value, "rewrote": False}
+
+    write_page(user_id, "goals", rebuilt)
+    return {"found": len(matches), "kept": kept_value, "rewrote": True}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

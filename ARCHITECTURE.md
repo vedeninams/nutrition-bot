@@ -253,6 +253,43 @@ text summaries so follow-ups can reference them. The reader returns the
 larger of "last 16 hours" or "last 20 messages" to avoid a midnight cliff.
 Anything older than 14 days is purged by the Saturday cron.
 
+#### `weight_readings`
+
+Raw weight history — one row per weighing (typically multiple per day).
+Populated by the hourly `withings_sync.py` cron job pulling from the
+Withings Health API. After each insert, `daily_stats.weight_kg` is
+automatically refreshed to the **minimum** reading of that calendar day
+(the morning-low convention), so all existing summary code keeps seeing
+"one weight per day."
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `id` | INTEGER PK | Auto-incremented. |
+| `user_id` | INTEGER FK | |
+| `measured_at` | TEXT | ISO timestamp from the source (Withings). |
+| `weight_kg` | REAL | The reading, in kilograms. |
+| `source` | TEXT | `'withings_api'` initially; future-proofed for other sources. |
+| `inserted_at` | TEXT | Default `datetime('now')`. |
+
+`UNIQUE(user_id, measured_at)` dedups when the polling script catches the
+same Withings reading twice.
+
+#### `withings_auth`
+
+OAuth tokens for the Withings Health API. One row per user who has
+authorized the bot to read their data. Populated once by
+`setup_withings.py` (interactive bootstrap), refreshed automatically by
+`withings_sync.py` when the access token expires.
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `user_id` | INTEGER PK | FK → `users`. |
+| `access_token` | TEXT | Bearer token (~3h lifetime). |
+| `refresh_token` | TEXT | Long-lived. Used to mint new access tokens. |
+| `expires_at` | TEXT | ISO timestamp when access_token expires. |
+| `withings_user_id` | TEXT | Withings' internal user ID, for reference. |
+| `updated_at` | TEXT | Default `datetime('now')`. |
+
 ### 3.2 The wiki on disk
 
 Each user has a folder at `wiki/user_<user_id>/` containing five markdown
@@ -1343,6 +1380,60 @@ doesn't reprocess old queued messages.
 
 ---
 
+## 11A. Module reference: `withings_sync.py` + `setup_withings.py`
+
+Two small scripts that handle the Withings Health API integration. Issue
+#7 introduced these to pull weight readings into `weight_readings`
+automatically.
+
+### `setup_withings.py` — one-time OAuth bootstrap
+
+Interactive script run once per user (typically just you, the owner of
+the bot). Walks through the Withings OAuth 2.0 authorization flow:
+
+1. Reads `WITHINGS_CLIENT_ID` / `WITHINGS_CLIENT_SECRET` /
+   `WITHINGS_REDIRECT_URI` from `.env`.
+2. Builds an authorization URL with the `user.metrics` scope (weight
+   readings) and prints it.
+3. You open the URL in your browser, log into Withings, click *Allow
+   access*. Withings redirects to the redirect URI with a `?code=...`
+   query parameter (the redirect page may not exist; the *code* in the
+   URL bar is what matters).
+4. You paste the code back into the terminal.
+5. The script POSTs the code to Withings' token endpoint, gets back an
+   access + refresh token, and stores them in the `withings_auth` table
+   for the given Telegram user_id.
+
+Run: `python setup_withings.py --user <telegram_user_id>`. Required env
+vars must be set first.
+
+### `withings_sync.py` — hourly polling
+
+Run by cron. For every user in `withings_auth`:
+
+1. **`ensure_fresh_token(user_id)`** — if the access token expires within
+   ~10 minutes, refresh via `refresh_access_token`. Withings' refresh
+   sometimes rotates the refresh token too; we store whichever comes
+   back. Token expiry timestamps are ISO UTC.
+2. **`fetch_recent_weights(user_id, days=2)`** — POST to
+   `https://wbsapi.withings.net/measure` with `action=getmeas`,
+   `meastype=1` (weight), and a window covering the last `days` days.
+   Withings encodes measurements as `(value, unit)` where the real number
+   is `value × 10^unit` (e.g. `(67230, -3)` = `67.230 kg`). The decoder
+   handles that. Returns a list of `{measured_at, weight_kg}` dicts.
+3. **`db.insert_weight_reading()`** for each. The `UNIQUE(user_id,
+   measured_at)` constraint silently dedups the overlap with the previous
+   hour's fetch.
+
+CLI:
+- `python withings_sync.py` — sync all connected users.
+- `python withings_sync.py --user <id>` — sync one user.
+- `python withings_sync.py --days N` — fetch the last N days (default 2).
+
+Errors are logged to `withings.log` (gitignored). Anything that returns
+non-zero `status` from Withings (bad token, rate limit, etc.) is logged
+and the script moves on to the next user — no user gets stuck.
+
 ## 12. Cron triggers and proactive pushes
 
 All times are **Berlin wall-clock**. The server's OS timezone is set to
@@ -1354,6 +1445,7 @@ the OS timezone is the actual source of truth).
 | `0 21 * * *` (every day 21:00) | `telegram_bot.py --evening-summary` | `run_evening_summary` → push `advisor.evening_summary` to every user (totals → AI analysis → meal-by-meal). |
 | `0 9 * * 0` (Sunday 09:00) | `telegram_bot.py --weekly-review` | `run_weekly_review` → push `advisor.weekly_review` (3-paragraph Sonnet review covering up to 30 days). |
 | `5 10 * * 6` (Saturday 10:05) | `telegram_bot.py --lint-cron` | `run_lint_cron` → for every user: lint the wiki, detect new contradictions, DM the oldest open one if any. Then global `purge_conversation_older_than(14)`. |
+| `7 * * * *` (every hour at :07) | `withings_sync.py` | For each user in `withings_auth`: refresh access token if needed, pull last 2 days of weight readings from Withings, insert any new ones into `weight_readings`. `daily_stats.weight_kg` is automatically refreshed to the day's min. |
 
 Inside the bot process, two more triggers run reactively rather than on
 a schedule:
@@ -1409,6 +1501,8 @@ both are restarted by `deploy.sh` when present.
 | `OPENAI_API_KEY` | Optional. Only used for Whisper voice transcription in `handle_voice`. Without it, voice messages return an error message. |
 | `NUTRITION_DB_PATH` | Optional override of the SQLite file path (defaults to `./nutrition.db`). Used by the test instance to keep its data separate. |
 | `WIKI_DIR` | Optional override of the wiki base directory (defaults to `./wiki`). |
+| `WITHINGS_CLIENT_ID` / `WITHINGS_CLIENT_SECRET` | Optional. From your Withings developer app at developer.withings.com. Required for the weight-sync integration; without them the hourly `withings_sync.py` cron is a no-op. |
+| `WITHINGS_REDIRECT_URI` | Optional. The callback URL registered with your Withings app. Defaults to `http://localhost:8765/callback`. Used during the one-time `setup_withings.py` bootstrap; never called by the bot at runtime. |
 
 ### crontab snippet
 
