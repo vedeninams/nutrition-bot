@@ -1543,6 +1543,43 @@ the bot). Walks through the Withings OAuth 2.0 authorization flow:
 Run: `python setup_withings.py --user <telegram_user_id>`. Required env
 vars must be set first.
 
+### `import_apple_health.py` — one-time backfill from Apple Health
+
+A separate, standalone script for importing weight history that lives
+outside the Withings API's reach. **Why we need it:** Apple Health
+merges weight data from many sources (Withings + manual entry +
+third-party scales + apps), but the Withings API itself only returns
+readings measured by Withings devices. So pre-Withings history (or any
+data synced in from a non-Withings source) needs Apple's export path.
+
+How it works:
+
+1. The user exports their Apple Health data from the iPhone Health app
+   (Profile → Export All Health Data), which produces a `.zip`
+   containing `apple_health_export/export.xml`.
+2. They transfer the ZIP to the server.
+3. They run: `python import_apple_health.py --user N --file export.zip`.
+
+Internals:
+
+- Streams the XML with `ET.iterparse` and `elem.clear()` to keep memory
+  bounded — Apple Health exports can exceed a gigabyte for several
+  years of dense data.
+- Filters for records with `type="HKQuantityTypeIdentifierBodyMass"`.
+- Converts the unit attribute to kg via a small lookup table
+  (`kg` / `g` / `lb` / `lbs` supported).
+- Parses Apple's `YYYY-MM-DD HH:MM:SS ±HHMM` date format into ISO UTC.
+- Inserts each reading via `db.insert_weight_reading` with
+  `source="apple_health"` so the import path is identifiable.
+- Idempotent via the DB's `UNIQUE(user_id, measured_at)` constraint —
+  re-running is a silent no-op for already-present readings.
+- `--dry-run` prints the count without writing.
+
+For zips, the script matches the inner XML by **exact basename**
+(`export.xml`), not by suffix — Apple's archive also contains
+`export_cda.xml` and other siblings that would otherwise match a
+naive `.endswith("export.xml")` check.
+
 ### `withings_sync.py` — hourly polling
 
 Run by cron. For every user in `withings_auth`:

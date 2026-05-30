@@ -224,6 +224,37 @@ python withings_sync.py --user <your_telegram_user_id> --since 2020-06-01
 Typical run for 5 years of history takes a minute or two and logs each
 chunk to `withings.log`.
 
+**Important limitation:** the Withings API only returns readings *measured
+by Withings devices*. If your Withings app shows older data that was synced
+in from Apple Health (or another scale), that data is NOT reachable via the
+Withings API — see the next step.
+
+### 6. (Optional) Import older data from Apple Health
+
+If you have weight history in Apple Health from before your Withings
+setup, export from Apple Health and import that:
+
+1. On your iPhone: open **Health** → tap your profile picture (top right)
+   → scroll to the bottom → **Export All Health Data**.
+2. iOS produces a `.zip` (typically `export.zip`). Transfer it to the
+   server — e.g. AirDrop to your Mac, then:
+   ```bash
+   scp export.zip root@<your-server-ip>:/opt/nutrition-bot/
+   ```
+3. Run the importer:
+   ```bash
+   python import_apple_health.py --user <your_telegram_user_id> --file export.zip
+   ```
+
+The script streams the XML (no memory issue even on multi-GB exports),
+normalizes the unit (kg / lb / g all handled), and inserts every weight
+reading with `source="apple_health"` so they're distinguishable from
+Withings API readings. Idempotent — `UNIQUE(user_id, measured_at)`
+silently skips anything you already have.
+
+Use `--dry-run` to see how many records would be imported without
+writing anything.
+
 ## Commands
 
 | Command | What it does |
